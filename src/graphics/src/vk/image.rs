@@ -686,6 +686,22 @@ fn page_hashes(lo: u64, hi: u64) -> Vec<u64> {
     v
 }
 
+/// Ranges (address, bytes) sorted and merged where they overlap or touch: the texture check's dirty ranges, which it
+/// reads as sorted and disjoint (web: the sync's ranges joined by the textures' compare by use).
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+fn merge_ranges(v: impl Iterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let mut v: Vec<(u64, u64)> = v.filter(|r| r.1 > 0).collect();
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (a, n) in v {
+        match out.last_mut() {
+            Some(l) if a <= l.0 + l.1 => l.1 = l.1.max(a + n - l.0),
+            _ => out.push((a, n)),
+        }
+    }
+    out
+}
+
 /// Whether a write to [a, a + n) changed a page of the texture's storage [lo, hi) since its hashes were taken (the
 /// changed pages' hashes are updated).
 fn pages_changed(hashes: &mut [u64], lo: u64, hi: u64, a: u64, n: u64) -> bool {
@@ -970,6 +986,18 @@ impl<V> Recent<V> {
     }
     fn remove(&mut self, k: &u64) {
         self.map.remove(k);
+    }
+}
+
+#[cfg(test)]
+mod merge_ranges_tests {
+    use super::*;
+
+    #[test]
+    fn ranges_come_out_sorted_and_disjoint() {
+        let v = merge_ranges([(8192, 4096), (0, 4096), (4096, 100), (100, 50), (20000, 0), (12000, 300)].into_iter());
+        assert_eq!(v, vec![(0, 4196), (8192, 4108)], "overlapping and touching ranges join; empty ones go");
+        assert!(v.windows(2).all(|w| w[0].0 + w[0].1 < w[1].0));
     }
 }
 
@@ -3809,6 +3837,37 @@ impl Gpu {
             self.upgrade_storage(&mut imgs, &pending, sub, cb);
         }
         let t_all = std::time::Instant::now();
+        // (web: no write watch) the textures' storage is compared with its pool's snapshot here, by use (texture storage
+        // is not resolved as a buffer: `mem::web_compare`); what the CPU changed joins the dirty ranges. Lock order
+        // images -> mem.
+        #[cfg(target_os = "emscripten")]
+        let web_dirty;
+        #[cfg(target_os = "emscripten")]
+        let dirty: &[(u64, u64)] = {
+            let mut spans: Vec<(u64, u64)> = imgs
+                .by_serial
+                .values()
+                .filter(|im| {
+                    !im.tex.mem.is_null()
+                        && im.sparse.is_none()
+                        && !crate::nvn::vpool::is_sparse(im.tex.mem as u64)
+                })
+                .map(|im| (im.tex.mem as u64, im.tex.l.size))
+                .collect();
+            spans.sort_unstable();
+            spans.dedup();
+            let found = if super::mem::web_by_use() {
+                super::mem::web_compare(self, sub, &spans)
+            } else {
+                Vec::new()
+            };
+            if found.is_empty() {
+                dirty
+            } else {
+                web_dirty = merge_ranges(dirty.iter().copied().chain(found));
+                &web_dirty
+            }
+        };
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             let max = imgs.max_size;
             let mut hit = Vec::new();
