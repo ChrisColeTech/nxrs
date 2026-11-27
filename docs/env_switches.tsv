@@ -60,6 +60,7 @@ NXGFX_IMAGE_NOFLAG	switch	no storage use and the writes were lost. With `NXGFX_I
 NXGFX_IMG_DUE	switch	MKW-SETS: a submission looks for the images due for initialization or upload among kept candidates (made or CPU-written since, found due and not yet prepared), the images the CPU writes overlap now and the sparse ones, instead of walking every image. Default on; `0`: the walk over every image, as before	src/graphics/src/vk/image.rs
 NXGFX_IMG_FORMAT	switch	`0` leaves storage image views in the texture's format instead of the format the shader declares	src/graphics/src/vk/exec.rs
 NXGFX_IMG_SPANS	switch	MKW-SETS: a submission's CPU-write check over many dirty ranges walks a kept list of the images' storage spans beside the sorted ranges (made again only when an image comes or goes) instead of looking every image up. Default on; `0`: the per-image lookup walk, as before	src/graphics/src/vk/image.rs
+NXGFX_IMG_SPAN_EDITS	switch	MKW-SYNC: the images' span list (`NXGFX_IMG_SPANS`) is brought up to date with the images added and released since it was made, instead of being made again from every image whenever one comes or goes. Default on; `0`: made again, as before	src/graphics/src/vk/image.rs
 NXGFX_LATE_OUTPUTS	switch	a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)	src/graphics/src/vk/shader.rs
 NXGFX_LAZY_ALL_FRAME	switch	Images a frame makes for shaders that index the texture pool, at most (with 32 MB of guest bytes); default `0`: every waiting one at once (a cap measured slower on Jamboree's opening)	src/graphics/src/vk/image.rs
 NXGFX_LAZY_CPU_CHECK	switch	`0` skips the check that lazily written-back pages were not written by the CPU meanwhile	src/graphics/src/vk/mem.rs
@@ -86,6 +87,7 @@ NXGFX_OCCL_POOL	switch	`NXGFX_OCCL_POOL` (default 4096): occlusion queries a sub
 NXGFX_OCCL_EARLY	switch`NXGFX_OCCL_EARLY=0`: report memory the game rewrote before resubmitting is left as the game wrote it until its result lands; by default the previous answer is put back at submit (OOT-OCC)	src/graphics/src/vk/occl.rs
 NXGFX_OP_TIMES	diagnostic	Replay time by record kind (`NXGFX_OP_TIMES=1`): every 600 presents a `[vk] replay by record` line	src/graphics/src/vk/exec.rs
 NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/vk/present.rs, src/graphics/tests/window.rs
+NXGFX_PARK_IN_PLACE	switch	MKW-SYNC: a stream that parks keeps its own buffer without the records already run, instead of copying the rest into a new buffer. Default on; `0`: the copy, as before	src/graphics/src/vk/queue.rs
 NXGFX_PARK_CHAIN	switch	MKW-PIPE: when a stream parks at an event wait, the parked queues whose wait a GPU signal recorded so far passes run on at once on the replay thread, each in a submission of its own without a pool sync (the first sync covers them; a wait passed by the event's value after a CPU signal is not chained). `NXGFX_PARK_CHAIN=0`: each through the parked-work retry with its own pool sync, as before	src/graphics/src/vk/queue.rs
 NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs
 NXGFX_PART_LTO	switch	make (NXGFX_PART_LTO=1: retained, as before)	src/graphics/src/vk/pipe.rs
@@ -155,6 +157,7 @@ NXGFX_SLOW_MS	switch	frames the sizes the game renders at (`[vk] render sizes â€
 NXGFX_SPARSE	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
 NXGFX_SPARSE_MIB	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
 NXGFX_SPIRV_VAL	test		src/graphics/src/vk/shader.rs
+NXGFX_SYNC_LEAN	switch	MKW-SYNC: a scanning pool sync makes its lists (every watched pool, what it asks, the cold pools left out, the tracked ones) in one walk over the pools, and its per-pool pass visits only the pools with work (the busy set and those the scan found written or could not read). Default on; `0`: a walk per list and a pass over every pool, as before	src/graphics/src/vk/mem.rs
 NXGFX_SPVFIX_IN	test	The two rewrites over a folder of translated modules (`NXGFX_SPVFIX_IN`), written to `NXGFX_SPVFIX_OUT` for	src/graphics/src/vk/spvfix.rs
 NXGFX_SPVFIX_OUT	test	The two rewrites over a folder of translated modules (`NXGFX_SPVFIX_IN`), written to `NXGFX_SPVFIX_OUT` for	src/graphics/src/vk/spvfix.rs
 NXGFX_STAGE_HOLD	switch	NXGFX_STAGE_HOLD=<s> (diagnosis, lane K2): they are freed that many seconds later instead (MKW's 128x128x5 pass	src/graphics/src/vk/queue.rs
@@ -218,7 +221,8 @@ NXOS_EXIT_AFTER_SUBMIT	switch	ends the process after that long, and `NXOS_EXIT_A
 NXOS_FIXED_TIME	switch	its monotonic clock), and calendar conversions use the host's time zone, as nxnative does. `NXOS_FIXED_TIME`	src/os/src/services/time.rs
 NXOS_FONT	switch	TTF for every slot (Arial, Segoe UI, Tahoma; `NXOS_FONT` names another).	src/os/src/services/misc.rs
 NXOS_FPS_TARGET	switch	value in game memory the host can raise. The target is the profile's `fps_target` (`NXOS_FPS_TARGET` overrides;	src/os/src/fpslock.rs
-NXOS_FREE_CORES	switch	`NXOS_FREE_CORES=1` turns the gate off (every thread runs whenever it is ready).	src/os/src/sched.rs
+NXOS_FSTEP_SHARE	switch	MKW-SYNC: the frame step's share rule, in percent of a 60-frame window (default 75): a shorter hold is tried when that share of the window's frames fit it (instead of 30 in a row) and is left for a longer one only while fewer than that share are on time (besides three late frames in a row and the rate short of the hold); late frames are shown late and paid back by the step. `0`: 30 frames in a row, as before	src/os/src/fstep.rs
+NXOS_FREE_CORES	switch`NXOS_FREE_CORES=1` turns the gate off (every thread runs whenever it is ready).	src/os/src/sched.rs
 NXOS_FS_TRACE	test	`NXOS_FS_TRACE=1` (debugging): every file open with its result, `=miss` only the failed ones.	src/os/src/services/fs.rs
 NXOS_GFX_SCALE	switch	the value oe GetGpuScaleFactor-style queries answer (default 0)	src/os/src/services/oe.rs
 NXOS_GLSLC_CAPTURE	diagnostic	`simple_table.rs`) and the game's own run-time GLSL compiler, whose outputs `NXOS_GLSLC_CAPTURE=<dir>` saves	src/os/src/services/nvdrv.rs

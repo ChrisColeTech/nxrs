@@ -2306,7 +2306,7 @@ fn run_stream_due(
                 st.parked.insert(
                     qserial,
                     Parked {
-                        stream: stream[off..].to_vec(),
+                        stream: park_rest(stream, off),
                         receipts,
                         wait_receipt: None,
                         presents: Vec::new(),
@@ -2335,7 +2335,7 @@ fn run_stream_due(
             st.parked.insert(
                 qserial,
                 Parked {
-                    stream: stream[off..].to_vec(),
+                    stream: park_rest(stream, off),
                     receipts,
                     wait_receipt: None,
                     presents: Vec::new(),
@@ -2363,6 +2363,18 @@ fn note_xlated(len: usize, segs0: u64) {
         let n = exec::seg_stats::SEGMENTS.load(Ordering::Relaxed).wrapping_sub(segs0);
         chain_trace::note("xlated", len as u64, n);
     }
+}
+
+/// (MKW-SYNC) The records of `stream` from `off` on, for a queue that parks there: the stream's own buffer without
+/// its head (a copy into a new buffer was a fresh allocation of up to ~1 MB, its pages faulted in, a few times a frame
+/// in Mario Kart World: ~0.5 ms of the replay thread a frame). `NXGFX_PARK_IN_PLACE=0`: the copy, as before.
+fn park_rest(mut stream: Vec<u8>, off: usize) -> Vec<u8> {
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *COPY.get_or_init(|| std::env::var("NXGFX_PARK_IN_PLACE").as_deref() == Ok("0")) {
+        return stream[off..].to_vec();
+    }
+    stream.drain(..off.min(stream.len()));
+    stream
 }
 
 fn note_park(rest: &[u8]) {
@@ -2478,7 +2490,7 @@ fn chain_parked(
                 st.parked.insert(
                     q,
                     Parked {
-                        stream: stream[off..].to_vec(),
+                        stream: park_rest(stream, off),
                         receipts: p.receipts,
                         wait_receipt: None,
                         presents: Vec::new(),

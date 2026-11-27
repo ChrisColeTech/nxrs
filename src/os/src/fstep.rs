@@ -46,6 +46,10 @@ pub const SAME: f64 = 1.1;
 pub const RAMP: f64 = 0.05;
 /// Grace frames a probe may take in all.
 pub const PROBE_MAX: i32 = 180;
+/// The share rule's window (frames at one hold; bits of a u64).
+pub const WIN: u32 = 60;
+/// The share rule's default (`NXOS_FSTEP_SHARE`, percent of the window; 0 = 30 frames in a row).
+pub const SHARE: u32 = 75;
 
 /// The controller (nxnative `nvn_fstep`).
 #[derive(Clone, Debug, Default)]
@@ -95,6 +99,17 @@ pub struct Fstep {
     pub smax: u32,
     /// the game does not take the step (it steps by its target): three late frames raise the hold whatever the average
     pub no_payback: bool,
+    /// The share rule (`NXOS_FSTEP_SHARE`, percent; 0 = off): over the last `WIN` frames at a hold, k − 1 is tried
+    /// when this share of them fits it (instead of `RUN` in a row), and k is left for a longer hold only while fewer
+    /// than this share of them are on time (besides three late in a row and the rate short of k). Frames over budget
+    /// are shown late and paid back by the step, so game time stays real time.
+    pub share: u32,
+    /// the window's frames at hold `win_k`: bit i set = frame fit k − 1 (`win_down`) / was on time (`win_ok`)
+    win_down: u64,
+    win_ok: u64,
+    win_i: u32,
+    win_n: u32,
+    win_k: u32,
     pub late: u64,
     pub paid: u64,
     pub ups: u64,
@@ -238,6 +253,9 @@ impl Fstep {
         } else {
             self.late_run = 0;
         }
+        if self.share > 0 {
+            self.window(held, cost, late);
+        }
         // the cost of the frames on time: at kmin, and at the longer hold
         if kmin != self.ckmin {
             if (1..=MAX).contains(&self.ckmin) {
@@ -283,7 +301,9 @@ impl Fstep {
         // a rate below k over the last RUN frames, the longest left out
         let omax = self.over.iter().cloned().fold(0.0f64, f64::max);
         let short_of_k = self.no_payback || self.over_sum - omax > LATE * RUN as f64;
-        if self.late_run >= 3 && self.k < kmax && short_of_k {
+        // the share rule: k is kept while enough of the window is on time (the rest shown late, paid back)
+        let share_short = self.share == 0 || self.no_payback || !self.share_ok();
+        if self.late_run >= 3 && self.k < kmax && short_of_k && share_short {
             // step up to the cost of the cheapest of the three late frames, at least one vsync
             let c3 = self.last_cost.iter().cloned().fold(f64::MAX, f64::min);
             let want = ((c3 - 0.05).ceil().max(0.0) as u32)
@@ -332,7 +352,12 @@ impl Fstep {
                 0
             };
         }
-        if self.fit_run >= RUN as u32 && self.since >= self.holdoff && self.trial == 0 {
+        let fits_lower = if self.share > 0 {
+            self.share_down()
+        } else {
+            self.fit_run >= RUN as u32
+        };
+        if fits_lower && self.since >= self.holdoff && self.trial == 0 && self.k > kmin {
             self.k -= 1;
             self.downs += 1;
             self.trial = RUN as u32;
@@ -351,6 +376,34 @@ impl Fstep {
         self.step = self.k + (self.debt >= 1.0 && self.k < smax) as u32;
         self.paid += (self.step > self.k) as u64;
         self.step
+    }
+
+    /// The share rule's window: this frame (held `held` vsyncs, its work `cost`) fit `held − 1` or not, and was on
+    /// time or not. A new hold starts the window again.
+    fn window(&mut self, held: u32, cost: f64, late: bool) {
+        if held != self.win_k {
+            self.win_k = held;
+            self.win_n = 0;
+            self.win_i = 0;
+            self.win_down = 0;
+            self.win_ok = 0;
+        }
+        let bit = 1u64 << self.win_i;
+        let down = held > 1 && cost <= FIT * (held - 1) as f64;
+        self.win_down = if down { self.win_down | bit } else { self.win_down & !bit };
+        self.win_ok = if late { self.win_ok & !bit } else { self.win_ok | bit };
+        self.win_i = (self.win_i + 1) % WIN;
+        self.win_n = (self.win_n + 1).min(WIN);
+    }
+
+    /// At least `share` % of the window's frames at this hold were on time.
+    fn share_ok(&self) -> bool {
+        self.win_n > 0 && self.win_ok.count_ones() * 100 >= self.share * self.win_n
+    }
+
+    /// A whole window at this hold, at least `share` % of it fitting the next shorter hold.
+    fn share_down(&self) -> bool {
+        self.win_n == WIN && self.win_down.count_ones() * 100 >= self.share * WIN
     }
 
     fn start_probe(&mut self) {
@@ -559,8 +612,19 @@ pub fn init(page: u64, data: &std::path::Path) {
     if !hold {
         crate::log!("frame step: frames are not held longer than the target's vsyncs (game profile fps_hold)");
     }
+    let share = std::env::var("NXOS_FSTEP_SHARE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(SHARE)
+        .min(100);
+    if share > 0 {
+        crate::log!(
+            "frame step: share rule: a shorter hold is tried when {share} % of {WIN} frames fit it and kept while {share} % are on time (NXOS_FSTEP_SHARE=0: {RUN} frames in a row)"
+        );
+    }
     let fs = Fstep {
         smax,
+        share,
         ..Default::default()
     };
     crate::log!(
@@ -893,6 +957,51 @@ mod tests {
         );
         let d = real - game - s.debt;
         assert!(d > -1.01 && d < 1.01);
+    }
+
+    /// MKW-SYNC: the share rule (`NXOS_FSTEP_SHARE`). Frames of which 4 in 20 run over (21-22 ms) and the rest fit
+    /// 15.8 ms: the 30-in-a-row rule never tries hold 1 from hold 2; the share rule tries it, keeps it, and pays the
+    /// late frames back (game time = real time). A rate well short of hold 1 (23 ms frames) still steps up.
+    #[test]
+    fn the_share_rule_holds_1_on_a_mostly_fitting_window() {
+        let shared = || Sim {
+            s: Fstep {
+                share: 75,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mostly = |m: &mut Sim, n: usize| {
+            for i in 0..n {
+                m.run(1, if i % 20 < 4 { 1.3 } else { 0.9 }, 1, 3, 0);
+            }
+        };
+        // start at hold 2 (a load's slow frames)
+        let mut old = Sim::default();
+        old.run(60, 0.5, 1, 3, 0);
+        old.run(30, 1.5, 1, 3, 0);
+        assert_eq!(old.s.k, 2);
+        mostly(&mut old, 3000);
+        assert!(old.s.k == 2 && old.s.downs == 0, "30 in a row: never tried");
+        let mut m = shared();
+        m.run(60, 0.5, 1, 3, 0);
+        m.run(30, 1.5, 1, 3, 0);
+        assert_eq!(m.s.k, 2);
+        mostly(&mut m, 3000);
+        assert!(
+            m.s.k == 1 && m.s.downs == 1 && m.s.ups == 1 && m.s.failed == 0,
+            "share: tried once and kept (downs {}, ups {}, failed {})",
+            m.s.downs,
+            m.s.ups,
+            m.s.failed
+        );
+        assert!(m.balanced() && m.s.paid > 0 && m.s.dropped == 0.0, "late frames paid back");
+        // 23 ms frames: fewer than 75 % on time at hold 1
+        let mut m = shared();
+        m.run(120, 0.5, 1, 3, 0);
+        m.run(600, 1.4, 1, 3, 0);
+        assert!(m.s.k == 2 && m.s.ups >= 1, "43 fps: 30");
+        assert!(m.balanced());
     }
 
     #[test]

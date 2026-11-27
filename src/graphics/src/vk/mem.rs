@@ -3161,6 +3161,74 @@ fn scan_list(m: &Pools, keep: impl Fn(&Pool) -> bool) -> (Vec<WatchedPool>, u64)
     (out, open_b)
 }
 
+/// (MKW-SYNC) `NXGFX_SYNC_LEAN` (default on; 0: off): a scanning sync makes its lists in one walk over the pools
+/// (`scan_lists`) and its per-pool pass visits only the pools with work (`Pools::busy` and those the scan found written
+/// or could not read), as a sync that does not scan does. Mario Kart World has ~4,600 pools; the seven walks over all
+/// of them (lists, prehash, the pass and the busy set made again) were ~1 ms of the replay thread a frame.
+pub fn sync_lean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_SYNC_LEAN").as_deref() != Ok("0"))
+}
+
+/// A scan's lists from one walk over the pools (`sync_lean`).
+struct ScanLists {
+    /// every watched pool (`watched_pools`)
+    all_watched: Vec<WatchedPool>,
+    /// what the scan asks and the bytes of open chunks in it (`scan_list` with `!skip`)
+    asked: Vec<WatchedPool>,
+    open_b: u64,
+    /// watched pools left out as cold (`skip`)
+    cold: Vec<u64>,
+    /// tracked pools not sealed: asked even with no chunk open
+    tracked: Vec<u64>,
+}
+
+/// `watched_pools`, `scan_list(m, !skip)`, the cold pools left out and the tracked pools not sealed, in one walk.
+fn scan_lists(m: &Pools, skip: impl Fn(&Pool) -> bool) -> ScanLists {
+    let mut runs: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+    if super::seal::chunks() {
+        for (e, a, b) in super::seal::open_runs() {
+            runs.entry(e).or_default().push((a, b));
+        }
+    }
+    let mut l = ScanLists {
+        all_watched: Vec::with_capacity(m.by_base.len()),
+        asked: Vec::new(),
+        open_b: 0,
+        cold: Vec::new(),
+        tracked: Vec::new(),
+    };
+    for p in m.by_base.values() {
+        if !p.watched {
+            continue;
+        }
+        if p.tracked && !p.sealed {
+            l.tracked.push(p.base);
+        }
+        let sk = skip(p);
+        if sk {
+            l.cold.push(p.base);
+        }
+        if !matches!(p.placement, Placement::Mirror | Placement::Host) {
+            continue;
+        }
+        let (lo, hi) = page_range(p.base, p.size);
+        l.all_watched.push((p.base, lo, hi, p.alloc_base));
+        if p.sealed || sk {
+            continue;
+        }
+        if p.tracked {
+            for &(a, b) in runs.get(&lo).map(|v| &v[..]).unwrap_or(&[]) {
+                l.asked.push((p.base, a, b, p.alloc_base));
+                l.open_b += b - a;
+            }
+        } else {
+            l.asked.push((p.base, lo, hi, p.alloc_base));
+        }
+    }
+    l
+}
+
 fn watched_pools_where(m: &Pools, keep: impl Fn(&Pool) -> bool) -> Vec<WatchedPool> {
     m.by_base
         .values()
@@ -3773,24 +3841,35 @@ pub fn begin_submit_ex(
         drain_woken(&mut m);
         // (a tracked pool's scan asks its open chunks only: it is never left out as cold)
         let skip = |p: &Pool| cold_on && !new_frame && !p.tracked && is_cold(p, frame);
-        cold_skipped = m
-            .by_base
-            .values()
-            .filter(|p| p.watched && skip(p))
-            .map(|p| p.base)
-            .collect();
-        // every watched pool (pages a run's call takes are handed to whichever pool holds them)
-        let all_watched = watched_pools(&m);
-        // what this scan asks: not a cold pool left out, not sealed (`seal`: not written since, or a store would have
-        // woken it), only the open chunks of a tracked one (chunk tracking: its closed chunks were not written since
-        // they closed, or a store would have opened them before this read)
-        let (asked, open_b) = scan_list(&m, |p| !skip(p));
+        let (all_watched, asked, open_b) = if sync_lean() {
+            // (MKW-SYNC) the four lists below in one walk over the pools
+            let l = scan_lists(&m, skip);
+            cold_skipped = l.cold.into_iter().collect();
+            for b in l.tracked {
+                taken.entry(b).or_default();
+            }
+            (l.all_watched, l.asked, l.open_b)
+        } else {
+            cold_skipped = m
+                .by_base
+                .values()
+                .filter(|p| p.watched && skip(p))
+                .map(|p| p.base)
+                .collect();
+            // every watched pool (pages a run's call takes are handed to whichever pool holds them)
+            let all_watched = watched_pools(&m);
+            // what this scan asks: not a cold pool left out, not sealed (`seal`: not written since, or a store would
+            // have woken it), only the open chunks of a tracked one (chunk tracking: its closed chunks were not written
+            // since they closed, or a store would have opened them before this read)
+            let (asked, open_b) = scan_list(&m, |p| !skip(p));
+            // a tracked pool is asked by this scan even when no chunk of it is open (its writes are then all taken
+            // already): the per-pool pass must not ask its whole range itself
+            for p in m.by_base.values().filter(|p| p.tracked && !p.sealed && p.watched) {
+                taken.entry(p.base).or_default();
+            }
+            (all_watched, asked, open_b)
+        };
         super::seal::OPEN_SCAN_B.fetch_add(open_b, Ordering::Relaxed);
-        // a tracked pool is asked by this scan even when no chunk of it is open (its writes are then all taken already):
-        // the per-pool pass must not ask its whole range itself
-        for p in m.by_base.values().filter(|p| p.tracked && !p.sealed && p.watched) {
-            taken.entry(p.base).or_default();
-        }
         // pools the walk in progress has walked since this op was queued, with no CPU signal since: their pages were
         // taken and drained into their pending writes when this sync took the watch lock (which it holds, so no piece
         // changes meanwhile); they need no scan here (`NXGFX_WALKER_POOLS=0` off)
@@ -3901,7 +3980,8 @@ pub fn begin_submit_ex(
                 }
             }
         };
-        if covered {
+        // (a pool holding pending pages is in `busy`; one that is not is only not hashed ahead)
+        if covered || sync_lean() {
             for b in m.busy.iter() {
                 if let Some(p) = m.by_base.get(b) {
                     pend(p);
@@ -3912,6 +3992,17 @@ pub fn begin_submit_ex(
         }
         super::upskip::prehash(&pages);
     }
+    // (MKW-SYNC, `sync_lean`) the pools a scan found written or could not read, for the per-pool pass below
+    let scan_keys: Vec<u64> = if !covered && sync_lean() {
+        taken
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(b, _)| *b)
+            .chain(retry_watch.iter().copied())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let Pools { by_base, busy: busy_set, .. } = &mut *m;
     let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
@@ -4050,15 +4141,24 @@ pub fn begin_submit_ex(
         }
         all.extend(ranges);
     };
-    if covered {
-        // no scan: only the pools with work of their own (`Pools::busy`); those left without any leave the set
-        let keys: Vec<u64> = busy_set.iter().copied().collect();
+    if covered || sync_lean() {
+        // no scan: only the pools with work of their own (`Pools::busy`); those left without any leave the set.
+        // (MKW-SYNC) a scan adds the pools it found written and those whose read failed: every other pool has nothing
+        // to do here (asked and found unwritten, sealed, or a cold one left out, with nothing pending), and is not busy
+        let mut keys: Vec<u64> = busy_set.iter().copied().collect();
+        if !scan_keys.is_empty() {
+            keys.extend(scan_keys);
+            keys.sort_unstable();
+            keys.dedup();
+        }
         for b in keys {
             match by_base.get_mut(&b) {
                 Some(p) => {
                     one(p);
                     if !busy(p) {
                         busy_set.remove(&b);
+                    } else if !covered {
+                        busy_set.insert(b);
                     }
                 }
                 None => {
@@ -4877,6 +4977,33 @@ mod seal_tests {
         let mut v: Vec<u64> = s.into_iter().collect();
         v.sort();
         assert_eq!(v, vec![100 * p, 110 * p, 140 * p, 200 * p, 201 * p + 64]);
+    }
+
+    /// (MKW-SYNC) The one walk gives what the four walks of a scanning sync give: every watched pool, what the scan
+    /// asks, the cold pools left out and the tracked pools not sealed.
+    #[test]
+    fn one_walk_makes_the_scan_lists() {
+        let p = PAGE;
+        let mut m = pools(&[(0, 4 * p), (4 * p, 2 * p), (8 * p, p), (12 * p, 3 * p), (20 * p, p), (30 * p, 2 * p), (40 * p, p)]);
+        m.by_base.get_mut(&(4 * p)).unwrap().sealed = true;
+        m.by_base.get_mut(&(8 * p)).unwrap().watched = false;
+        m.by_base.get_mut(&(12 * p)).unwrap().placement = Placement::Vram;
+        m.by_base.get_mut(&(20 * p)).unwrap().tracked = true;
+        m.by_base.get_mut(&(30 * p)).unwrap().dirty_frame = 7;
+        let t = m.by_base.get_mut(&(40 * p)).unwrap();
+        t.tracked = true;
+        t.sealed = true;
+        // "cold": the pool written at frame 7, or the tracked one (a scan never leaves a tracked pool out; the rule is
+        // the caller's, the walk only applies it)
+        let skip = |q: &Pool| q.dirty_frame == 7;
+        let l = scan_lists(&m, skip);
+        assert_eq!(l.all_watched, watched_pools(&m));
+        let (asked, open_b) = scan_list(&m, |q| !skip(q));
+        assert_eq!((&l.asked, l.open_b), (&asked, open_b));
+        let cold: Vec<u64> = m.by_base.values().filter(|q| q.watched && skip(q)).map(|q| q.base).collect();
+        assert_eq!(l.cold, cold);
+        assert_eq!(l.tracked, vec![20 * p], "tracked and not sealed");
+        assert!(l.asked.iter().all(|a| a.0 != 4 * p && a.0 != 8 * p && a.0 != 12 * p && a.0 != 30 * p));
     }
 
     /// A pool is sealed only after `quiet` frames without a CPU write and without a landing, with nothing waiting to go
