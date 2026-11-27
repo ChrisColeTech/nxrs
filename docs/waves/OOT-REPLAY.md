@@ -128,16 +128,20 @@ route checks still on): its house stretch is a different picture, its busy fell 
 | `014718-or-v1-house` | v1 | 21.6 / 18.5 | 33-38 | 0/32/66/2 | 0.37 s | 128 | 5/5 |
 | `015911-or-v1-house-off` | v1, `SNAP_KEEP=32` | 19.9 / 18.0 | 37-38 | 0/17/79/4 | 2.3 s | 4,096+ | 5/5 |
 | `024255-or-v2-house` | final (1-3) | 21.4 / 18.0 | 33-35 | 0/29/69/2 | 0.12 s | 64 | 5/5 |
+| `025525-or-v2-house2` | final (1-3) | 20.7 / 18.0 | 33-37 | 0/23/75/2 | 0.17 s | 64 | 5/5 |
+| `030719-or-v2-house-off` | final, `SNAP_KEEP=32` | **18.6 / 12.0** | 36-43 | 0/22/73/6 | 9.5 s | 3,840 | 5/5 |
 
 Sheets read: every sheet of every run above (ob-prof-walk, v1, v1-prof, v1-off, v1-house, v1-house-off, v2, v2-off,
 v2-house). Pictures correct: the house's occlusion-tested objects (Navi's glow, the door's light, the lamps, pots and
 herbs, the window's light shafts) present and steady in all 30 shots of each house run and in every `oot` house and
-walk shot; no flicker, popping or pop-in of them. **One wrong frame:** `or-v2-house/24-d21` (676 s): the hanging
+walk shot; no flicker, popping or pop-in of them. **One wrong frame, twice:** `or-v2-house/24-d21` (676 s) and `or-v2-house2/25-d22` (679 s): the hanging
 herbs, vines and the ceiling's thatch drawn displaced (floating in the room, leaves over Link) for that shot, the
-shots before and after correct. That is OOT-FLASH's open "Fault A" (one frame, the same props displaced, its
-`064040-hd/16-d13`; per-object data read stale, root cause not proven there), seen before this wave on the base; this
-wave's changes touch only the texture pool snapshots (which textures a slot names, not where a mesh goes). Not
-counted as caused here; not proven absent either (one shot in ~150 house shots). `06-deku_tree` of v1 shows the forest with a Kokiri girl on a woven pink mat
+shots before and after correct. That is OOT-FLASH's open "Fault A": the main checkout's
+`build/play/20261126-064040-hd-oot-house/16-d13.png`, from a build a day older than this wave, is the **same picture
+leaf for leaf**, and OOT-FLASH saw it recur at ~675 s of this scenario (`103850-of-fix1-oot-house/23-d20`). Not caused
+by this wave as far as the evidence goes, though the three controls' shots (v1-house-off, v2-house-off: d21/d22 at
+677/679 s) did not catch it and the v1 house run's did not either; two of two final-build house runs did. One frame
+at a fixed moment, caught or missed by a 1.5 s shot grid: not enough to call either way, so it is listed as Unproven. `06-deku_tree` of v1 shows the forest with a Kokiri girl on a woven pink mat
 (correct scene, a different moment of the cutscene than other runs). Fault captures (house runs): the known 16 (the
 nightmare's lightning 1-2, the forest load's no-target frames 3-10, cutscene cuts 11-16, e.g. `fault-14-p13854.png`
 the cut to the fence), none in the house stretch. Red lines: the known two, plus in v2 at 904.6 s **"pipeline cache
@@ -207,8 +211,8 @@ controls with `SNAP_KEEP=32`, Link walking: 15.0 / 9.0 and 18.5 / 8.0. Replay bu
 frame against 97-159. The unsampled final runs' walk (27.9-28.2 / 20.0) had Link out of view by the bed (not
 comparable). House standing: busy 29-35 ms against 35-45 in the controls; `oot-house` 21.4-21.6 / 18.0-18.5 against
 19.9 / 18.0 (control): FPS there is set by the frame step's 2-or-3-vsync choice, and the replay thread is 27 % idle in
-the house. Route checks on in every run (6/6, 5/5). Every sheet and the fault captures read: correct except one
-frame of OOT-FLASH's known Fault A in `or-v2-house/24-d21` (section 4). The pipeline-cache allocation failure
+the house. Route checks on in every run (6/6, 5/5). Every sheet and the fault captures read: correct except the
+known Fault A frame at ~677 s caught by two final-build house shots (identical on an older build; section 4). The pipeline-cache allocation failure
 recurred in v2 at 904.6 s and was skipped instead of aborting the game (change 2 shown in the game).
 
 ### 4. Unproven
@@ -220,8 +224,11 @@ recurred in v2 at 904.6 s and was skipped instead of aborting the game (change 2
   there is not shown (the camera never frames him in that spot). Because v1 / v2 stayed there, their unsampled walk
   FPS is not a fair number; the sampled pair and the controls are.
 - The 5 GB of pooled staging / scratch (section 5): not trimmed.
-- One displaced-props frame (OOT-FLASH Fault A) in `or-v2-house/24-d21`: judged the known open fault, not shown to
-  be unrelated by an A/B (it is one frame in ~150 house shots; the controls showed none in 60).
+- The displaced-props frame at ~676-679 s of `oot-house` (OOT-FLASH Fault A): identical leaf for leaf on a build a
+  day older than this wave (`20261126-064040-hd-oot-house/16-d13`), so it exists without these changes; but both
+  final-build house runs caught it and none of the three runs with the old snapshot rule / v1 did. Next step: an
+  `oot-house` pair with shots every frame over [674, 682] (`NXGFX_SHOT_EVERY`), final build and `SNAP_KEEP=32`, to
+  see whether the frame occurs in both. If it occurs only with keeping, default `NXGFX_SNAP_KEEP=32` until found.
 - `NXGFX_SNAP_KEEP` keeps up to 256 x 10 MB of host-visible (BAR) memory; OoT used 64-128.
 
 ### 5. Slips
