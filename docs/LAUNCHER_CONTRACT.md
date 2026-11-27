@@ -122,7 +122,7 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
 | Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
-| Build for web | the same with `--outdir <webDir>`, then `--shaders-from <buildDir>\<name>_data` (when the game has a build folder) and `--target web` last (`model::args::build_web`); below |
+| Build > Web | the same with `--outdir <webDir>`, then `--shaders-from <buildDir>\<name>_data` (when the game has a build folder) and `--target web` last (`model::args::build_web`); below |
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
@@ -173,8 +173,17 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
 
 ### Web builds (`--target web`, docs/35 W5)
 
-A browser build of the same game (Chrome is the target), built by Game > **Build for web** (also in the game's
-context menu; `nxrs.exe --select-title <title> --build-web` headless) into the game's web folder, `<webDir>` =
+**One Play, one Build** (owner, 2026-11-27; WEB-W5b). The Game menu, the game's context menu, the card's primary
+button, Enter / double-click, Ctrl+B and the Updates window's Build now each have one Play or one Build, and each
+opens the Native / Web chooser: a small dialog titled Play or Build, its heading the game, a line per target saying
+what it does or why it cannot run now, and two equal buttons, **Native** and **Web**, that act at once (the header
+X or Escape dismisses it). Play is enabled when either target can run, Build when either can build (`App::why_not`
+is the one rule). Play's reasons: no native build yet; no web build yet; no Chromium browser found; the game is
+running or building. Build's: the native build is up to date (Native); another build is running; the source is
+missing; nxrs-build cannot build. Native runs the existing build and play; Web the paths below.
+
+A browser build of the same game (Chrome is the target), built by Build > **Web** (`nxrs.exe --select-title
+<title> --build-web` headless) into the game's web folder, `<webDir>` =
 `<base>\nxrs-web\<outputName>` beside its `<base>\nxrs\<outputName>`. The native build is not touched and the library
 entry does not change (no `builtSource`, no INI, no DLC sync). The run's lines, `@progress` and `@result` are a
 build's; its log is `<webDir>\<outputName>.build.log`. Success: exit 0 **and** `<webDir>\build.json` and
@@ -226,7 +235,7 @@ lower case, `-` between words) on port 8780 (`NXRS_WEB_PORT`; the next of ten wh
 the page's origin, and with it the browser's data cache and saves, stays the same. `nxrs.exe --serve-web <webDir>`
 serves one folder without a window; `src/web/dev_server.py` (engine development) does the same.
 
-**Play in browser** is shown only when the web folder holds a finished web build and a Chromium browser exists:
+Play > **Web** can run only when the web folder holds a finished web build and a Chromium browser exists:
 the default browser when its `http` ProgId is Chrome, Edge, Brave, Chromium, Vivaldi or Opera, else Chrome by path
 (App Paths, then Program Files, Program Files (x86), the user's local data; Linux: `google-chrome`,
 `chromium` on PATH). It starts the server (once), mounts the build (with the toolchain's nxrs-build for run-time

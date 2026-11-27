@@ -8,12 +8,17 @@ pub enum Action {
     ImportBuildPick,
     Settings(usize),
     Exit,
+    /// Play: asks Native or Web (the target chooser)
     Play,
     Stop,
+    /// Build: asks Native or Web (the target chooser)
     Build,
-    /// Build for web: `--target web` into the game's web folder
+    /// the chooser's answers: the native build started from this PC, the native build made
+    PlayNative,
+    BuildNative,
+    /// a build for the browser: `--target web` into the game's web folder
     BuildWeb,
-    /// Play in browser: the web build served locally, opened in Chrome
+    /// the web build served locally, opened in a Chromium browser
     PlayWeb,
     Properties(usize),
     InstallDlc,

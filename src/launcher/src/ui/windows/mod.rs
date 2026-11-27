@@ -9,6 +9,7 @@ mod properties_tabs;
 mod rail_window;
 mod settings;
 mod settings_tabs;
+mod target;
 mod updates;
 
 use crate::flows::surface::Surface;
@@ -48,6 +49,7 @@ fn spec<'a>(surface: &Surface, key: &'a str, title: &'a str) -> ChildSpec<'a> {
         Surface::Updates(_) => ChildSpec::surface(key, title, c::UPDATES),
         Surface::Message { text, .. } => message::spec(key, title, text, false),
         Surface::Question { text, check, .. } => message::spec(key, title, text, check.is_some()),
+        Surface::Target { .. } => target::spec(key, title),
         Surface::ToolPopup => ChildSpec::work(key, title, 0.0, 0.0),
     }
 }
@@ -124,6 +126,7 @@ fn title_of(app: &App, surface: &Surface) -> String {
         Surface::Settings(_) => s::SETTINGS_TITLE.into(),
         Surface::Dlc(w) => format!("{}{}", d::WINDOW_TITLE, game(&w.game_id)),
         Surface::Updates(w) => format!("{}{}", u::WINDOW_TITLE, game(&w.game_id)),
+        Surface::Target { build, .. } => target::title(*build),
         Surface::ToolPopup => String::new(),
     }
 }
@@ -143,6 +146,7 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
         Surface::Settings(s) => settings::show(ui, app, s),
         Surface::Dlc(w) => dlc::show(ui, app, w),
         Surface::Updates(w) => updates::show(ui, app, w),
+        Surface::Target { game_id, build } => target::show(ui, app, game_id, *build),
         Surface::ToolPopup => Reply::default(),
     }
 }

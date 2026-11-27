@@ -91,6 +91,27 @@ pub fn footer_at_bottom(
     footer_bar(ui, p, lead, ghost, primary)
 }
 
+/// A choice dialog's footer at the bottom of the space left (owner, 2026-11-27: its choices are its
+/// buttons, equal weight, each acts at once; no dismissal, the header X): a hairline, then the
+/// choices as filled buttons at the trailing side in their order, each (label, enabled, tooltip or
+/// the reason it is disabled). The one pressed.
+pub fn footer_choices(ui: &mut Ui, p: &Palette, choices: &[(&str, bool, &str)]) -> Option<usize> {
+    ui.add_space((ui.available_height() - c::FOOTER).max(0.0));
+    let rect = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
+    ui.add_space(c::GAP + 2.0);
+    let mut out = None;
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        for (at, (label, enabled, tip)) in choices.iter().enumerate().rev() {
+            if button::tip(button::primary(ui, p, label, *enabled), tip).clicked() {
+                out = Some(at);
+            }
+        }
+    });
+    out
+}
+
 /// An in-window popover's frame (Search & Filter, Build tools): raised fill, border, the shared
 /// shadow and the scaffold's inset; its first row is `header`.
 pub fn popover_frame(p: &Palette) -> egui::Frame {

@@ -1,15 +1,15 @@
-//! Build for web and Play in browser: the server's answers (headers, ranges, the data folder, paths
-//! that leave the build), `--serve-web`, and the flow from the menu through the fake engine's web
+//! Build and Play answered Web: the server's answers (headers, ranges, the data folder, paths that
+//! leave the build), `--serve-web`, and the flow from Build's chooser through the fake engine's web
 //! build to the served page.
 mod common;
 
 use common::*;
-use nxrs_launcher::constants::words_web as w;
+use nxrs_launcher::constants::{words_target as t, words_web as w};
+use nxrs_launcher::flows::surface::Surface;
 use nxrs_launcher::flows::{Action, Outcome};
 use nxrs_launcher::model::web_build::web_dir;
 use nxrs_launcher::services::browser::Browser;
 use nxrs_launcher::services::web_serve::{WebServer, open_build};
-use nxrs_launcher::ui::chrome::menu_model::{Item, context, menu};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
@@ -176,18 +176,8 @@ fn serve_web_serves_a_folder_from_the_command_line() {
     );
 }
 
-fn labels(items: &[Item]) -> Vec<String> {
-    items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Command { label, .. } => Some(label.clone()),
-            Item::Separator => None,
-        })
-        .collect()
-}
-
 #[test]
-fn build_for_web_then_play_in_browser() {
+fn build_web_then_play_web() {
     let (_t, dir) = tmp();
     let mut g = built_game(&dir);
     g.build_dir = format!("{dir}/nxrs/Kart");
@@ -195,24 +185,32 @@ fn build_for_web_then_play_in_browser() {
     write(&g.executable(), b"fixture");
     write(&g.code_module(), b"fixture");
     let mut app = app_with(&dir, vec![g.clone()]);
-    // no web build yet: Build for web is there, Play in browser is not
-    assert!(labels(&context(&app)).contains(&w::BUILD_WEB.to_string()));
-    assert!(!labels(&menu(&app, "Game")).contains(&w::PLAY_WEB.to_string()));
+    // built natively, no web build yet: Build asks, and only Web can build
+    assert_eq!(app.why_not("g", true, false), Some(t::UP_TO_DATE.into()));
+    assert_eq!(app.why_not("g", false, true), Some(t::NO_WEB_BUILD.into()));
+    app.dispatch(Action::Build);
+    let chooser = Surface::Target {
+        game_id: "g".into(),
+        build: true,
+    };
+    assert_eq!(app.surfaces, vec![chooser]);
+    app.surfaces.clear();
+    // the chooser's Web answer
     app.dispatch(Action::BuildWeb);
     app.wait_idle(std::time::Duration::from_secs(20));
     assert_eq!(app.outcomes, vec![Outcome::Smoke(true)]);
     assert_eq!(web_dir(&g), format!("{dir}/nxrs-web/Kart"));
     // the fake engine wrote a web folder only because it was asked for `--target web`
     assert!(read(&format!("{}/Kart.build.log", web_dir(&g))).contains(w::DONE));
-    // the native build is untouched; the web one is there, but no browser: still not offered
+    // the native build is untouched; the web one is there, but no browser: Web cannot play
     assert!(app.facts_of("g").playable() && app.facts_of("g").web_build);
-    assert!(!labels(&context(&app)).contains(&w::PLAY_WEB.to_string()));
+    assert_eq!(app.why_not("g", false, true), Some(t::NO_BROWSER.into()));
     let browser = Browser {
         name: "Test".into(),
         program: FAKE.into(),
     };
     app.tools.browser = Some(browser);
-    assert!(labels(&menu(&app, "Game")).contains(&w::PLAY_WEB.to_string()));
+    assert_eq!(app.why_not("g", false, true), None);
     app.dispatch(Action::PlayWeb);
     let url = app.job_label.split(": ").nth(1).unwrap().to_string();
     assert!(url.ends_with("/kart/"), "{}", app.job_label);

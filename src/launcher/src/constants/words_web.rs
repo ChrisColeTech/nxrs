@@ -1,12 +1,10 @@
-//! What Build for web and Play in browser say.
+//! What Build and Play say when their chooser's answer is Web.
 
-pub const BUILD_WEB: &str = "Build for web";
-pub const PLAY_WEB: &str = "Play in browser";
 pub const OUTPUT: &str = "Web build output";
 pub const NO_FOLDER: &str = "Cannot create the web build folder.";
-pub const DONE: &str = "Web build complete. Play in browser serves it from this computer.";
+pub const DONE: &str = "Web build complete. Play > Web serves it from this computer.";
 /// The status bar after a web build (the native build's "ready to play" would mislead).
-pub const JOB_DONE: &str = "Web build complete — Play in browser";
+pub const JOB_DONE: &str = "Web build complete — Play > Web";
 pub const MISSING_FILES: &str =
     "nxrs-build finished, but the web build is incomplete (no build.json or game.wasm).";
 pub const NOT_SERVED_TITLE: &str = "Cannot play in the browser";

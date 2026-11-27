@@ -28,6 +28,10 @@ impl App {
             self.tools.can_build(),
         );
         s.action_enabled &= !self.demo;
+        if self.card_plays_web(&g.id, &s.action) {
+            s.action = crate::constants::menus::PLAY.into();
+            s.action_enabled = true;
+        }
         s
     }
 

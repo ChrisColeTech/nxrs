@@ -13,5 +13,6 @@ pub mod words_dlc;
 pub mod words_library;
 pub mod words_play;
 pub mod words_settings;
+pub mod words_target;
 pub mod words_updates;
 pub mod words_web;

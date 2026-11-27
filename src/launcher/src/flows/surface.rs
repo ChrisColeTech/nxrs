@@ -54,6 +54,11 @@ pub enum Surface {
     Settings(Box<SettingsDraft>),
     Dlc(ListWindow),
     Updates(ListWindow),
+    /// Play or Build (`build`) asks where: Native or Web (owner, 2026-11-27: one Play, one Build)
+    Target {
+        game_id: String,
+        build: bool,
+    },
     ToolPopup,
 }
 
@@ -67,6 +72,7 @@ impl Surface {
             Surface::Settings(_) => "settings".into(),
             Surface::Dlc(_) => "dlc".into(),
             Surface::Updates(_) => "updates".into(),
+            Surface::Target { .. } => "target".into(),
             Surface::ToolPopup => "tool-popup".into(),
         }
     }

@@ -144,7 +144,7 @@ impl App {
         self.bar = Some((current, total));
     }
 
-    /// The card's primary button: Stop / Cancel build, Play, or Build.
+    /// The card's primary button: Stop / Cancel build, or Play or Build (each asks Native or Web).
     pub fn card_action(&mut self, id: &str) {
         self.select(id);
         if self.demo || self.lib.find(id).is_none() {
@@ -152,10 +152,9 @@ impl App {
         }
         if self.busy(id) {
             self.stop();
-        } else if self.facts_of(id).playable() {
-            self.play();
         } else {
-            self.start_build();
+            let plays = self.facts_of(id).playable() || self.can_target(id, false);
+            self.ask_target(!plays);
         }
     }
 

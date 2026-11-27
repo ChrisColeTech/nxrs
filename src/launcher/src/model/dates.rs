@@ -32,6 +32,19 @@ pub fn list(date: &Option<NaiveDateTime>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+/// A file time (ms since 1970) as the Play and Build dialogs say it: "26 Nov 2026, 9:14 PM".
+pub fn spoken(ms: u128) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(DateTime::from_timestamp_millis)
+        .map(|d| {
+            d.with_timezone(&Local)
+                .format("%-d %b %Y, %-I:%M %p")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// Now, to the second.
 pub fn now() -> NaiveDateTime {
     let n = Local::now().naive_local();

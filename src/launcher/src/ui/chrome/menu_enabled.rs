@@ -5,7 +5,9 @@ use crate::constants::menus as m;
 use crate::flows::App;
 
 pub struct Enabled {
+    /// Play (it asks Native or Web): either can run now
     pub play: bool,
+    /// Build (it asks Native or Web): either can build now
     pub build: bool,
     pub stop: bool,
     pub stop_label: &'static str,
@@ -14,10 +16,6 @@ pub struct Enabled {
     pub per_game: bool,
     pub save_folder: bool,
     pub log: bool,
-    /// Build for web: as Build, but an existing native or web build does not block it
-    pub build_web: bool,
-    /// Play in browser is shown at all (a web build and a Chromium browser exist)
-    pub play_web: bool,
 }
 
 pub fn enabled(app: &App) -> Enabled {
@@ -27,11 +25,10 @@ pub fn enabled(app: &App) -> Enabled {
         .as_deref()
         .map_or((false, false), |i| (app.is_running(i), app.is_building(i)));
     let exists = id.is_some();
-    let can_build =
-        exists && !app.demo && !app.builder_busy() && f.source_available && app.tools.can_build();
+    let can = |build| id.as_deref().is_some_and(|i| app.can_target(i, build));
     Enabled {
-        play: exists && !app.demo && f.playable() && !playing && !building,
-        build: can_build && !playing && !f.playable(),
+        play: can(false),
+        build: can(true),
         stop: building || playing,
         stop_label: if building { m::CANCEL_BUILD } else { m::STOP },
         exists,
@@ -39,7 +36,5 @@ pub fn enabled(app: &App) -> Enabled {
         per_game: exists && !app.demo,
         save_folder: exists && f.has_build,
         log: app.has_log(),
-        build_web: can_build,
-        play_web: id.as_deref().is_some_and(|i| app.can_play_web(i)),
     }
 }

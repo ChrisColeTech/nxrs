@@ -1,6 +1,6 @@
-//! Build for web and Play in browser (docs/35 W5): the build runs like any other through contract v2
-//! (`--target web`, into the game's web folder); Play serves that folder from the launcher's own web
-//! server and opens it in a Chromium browser.
+//! Build and Play answered Web (docs/35 W5, one Play and one Build since W5b): the build runs like any
+//! other through contract v2 (`--target web`, into the game's web folder); Play serves that folder from
+//! the launcher's own web server and opens it in a Chromium browser.
 
 use super::runs::BuildRun;
 use super::{App, Outcome};
@@ -55,7 +55,7 @@ impl App {
         self.outcomes.push(Outcome::Smoke(ok));
     }
 
-    /// Play in browser is offered: a finished web build and a browser that can play it.
+    /// Play > Web can run: a finished web build and a browser that can play it.
     pub fn can_play_web(&self, id: &str) -> bool {
         !self.demo && self.tools.browser.is_some() && self.facts_of(id).web_build
     }

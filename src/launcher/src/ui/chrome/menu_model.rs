@@ -2,7 +2,7 @@
 //! `menu_enabled`'s.
 
 pub use super::menu_enabled::{Enabled, enabled};
-use crate::constants::{menus as m, words_web as w};
+use crate::constants::menus as m;
 use crate::flows::{Action, App};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,15 +36,6 @@ fn check(label: &str, checked: bool, action: Action) -> Item {
     }
 }
 
-/// Play in browser, when it is shown.
-fn play_web(e: &Enabled) -> Vec<Item> {
-    if e.play_web {
-        vec![cmd(w::PLAY_WEB, "", true, Action::PlayWeb)]
-    } else {
-        Vec::new()
-    }
-}
-
 pub fn filter_label(app: &App) -> String {
     let n = app.filters.query().active_count();
     if n > 0 {
@@ -66,21 +57,17 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
             Item::Separator,
             cmd(m::EXIT, m::KEY_EXIT, true, Action::Exit),
         ],
-        "Game" => [
-            vec![cmd(m::PLAY, "", e.play, Action::Play)],
-            play_web(&e),
-            vec![
-                cmd(e.stop_label, "", e.stop, Action::Stop),
-                cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
-                cmd(w::BUILD_WEB, "", e.build_web, Action::BuildWeb),
-                Item::Separator,
-                cmd(m::INSTALL_DLC, "", e.per_game, Action::InstallDlc),
-                cmd(m::INSTALL_UPDATES, "", e.per_game, Action::InstallUpdates),
-                Item::Separator,
-                cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
-            ],
-        ]
-        .concat(),
+        // one Play and one Build: each asks Native or Web (owner, 2026-11-27)
+        "Game" => vec![
+            cmd(m::PLAY, "", e.play, Action::Play),
+            cmd(e.stop_label, "", e.stop, Action::Stop),
+            cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
+            Item::Separator,
+            cmd(m::INSTALL_DLC, "", e.per_game, Action::InstallDlc),
+            cmd(m::INSTALL_UPDATES, "", e.per_game, Action::InstallUpdates),
+            Item::Separator,
+            cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
+        ],
         "Keys" => vec![
             cmd(m::INSTALL_KEYS, "", true, Action::InstallKeys),
             cmd(m::KEYS_FOLDER, "", true, Action::OpenKeysFolder),
@@ -117,11 +104,9 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
 /// The game context menu of the gallery and the list.
 pub fn context(app: &App) -> Vec<Item> {
     let e = enabled(app);
-    let mut items = vec![cmd(m::PLAY, "", e.play, Action::Play)];
-    items.extend(play_web(&e));
-    items.extend([
+    vec![
+        cmd(m::PLAY, "", e.play, Action::Play),
         cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
-        cmd(w::BUILD_WEB, "", e.build_web, Action::BuildWeb),
         cmd(
             m::PROPERTIES,
             m::KEY_PROPERTIES,
@@ -134,8 +119,7 @@ pub fn context(app: &App) -> Vec<Item> {
         cmd(m::GAME_LOG, "", e.log, Action::ViewGameLog),
         Item::Separator,
         cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
-    ]);
-    items
+    ]
 }
 
 /// The Add game button's drop-down.
