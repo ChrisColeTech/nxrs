@@ -5,15 +5,13 @@
 //! `<file>.gz` with `Content-Encoding`; files carry an ETag and are revalidated (`304`).
 
 use super::web_file;
-use super::web_serve::{Mount, Mounts};
+use super::web_serve::Mounts;
 use crate::constants::web as c;
 use crate::model::http_cache;
 use crate::model::http_range::{self, Answer};
-use crate::model::web_build::{self, Target};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 struct Request {
@@ -24,6 +22,8 @@ struct Request {
     /// the body's length (a POST)
     length: u64,
     accept: Option<String>,
+    /// the `Host` header: an imported web game is served at the root of its own host
+    host: Option<String>,
     if_none_match: Option<String>,
 }
 
@@ -51,6 +51,7 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
                 length: 0,
                 accept: None,
                 if_none_match: None,
+                host: None,
             });
             continue;
         };
@@ -65,29 +66,11 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
                 "content-length" => rq.length = v.parse().ok()?,
                 "accept-encoding" => rq.accept = Some(v.to_string()),
                 "if-none-match" => rq.if_none_match = Some(v.to_string()),
+                "host" => rq.host = Some(v.to_string()),
                 _ => {}
             }
         }
     }
-}
-
-/// The file a path names: `/<slug>/<rest>` in a mounted build; Err(location) for `/<slug>` alone.
-fn resolve(path: &str, mounts: &Mounts) -> Result<Option<PathBuf>, String> {
-    let trimmed = path.trim_start_matches('/');
-    let (slug, rest) = match trimmed.split_once('/') {
-        Some((s, r)) => (s, Some(r)),
-        None => (trimmed, None),
-    };
-    let mount: Option<Mount> = mounts.lock().ok().and_then(|m| m.get(slug).cloned());
-    let Some(m) = mount else { return Ok(None) };
-    let Some(rest) = rest else {
-        return Err(format!("/{slug}/"));
-    };
-    Ok(match web_build::route(rest, &m.entry) {
-        Some(Target::Build(p)) => Some(m.root.join(p)),
-        Some(Target::Data(p)) => Some(m.data.join(p)),
-        None => None,
-    })
 }
 
 fn head(status: u16, headers: &[(&str, String)], length: u64) -> String {
@@ -121,7 +104,7 @@ fn answer(out: &mut TcpStream, req: &Request, mounts: &Mounts) -> std::io::Resul
         let allow = vec![("Allow", "GET, HEAD".to_string())];
         return out.write_all(plain(405, allow).as_bytes());
     }
-    let file = match resolve(&req.path, mounts) {
+    let file = match super::web_route::resolve(&req.path, req.host.as_deref(), mounts) {
         Err(location) => return out.write_all(plain(301, vec![("Location", location)]).as_bytes()),
         Ok(f) => f.and_then(|p| File::open(&p).ok().map(|f| (p, f))),
     };

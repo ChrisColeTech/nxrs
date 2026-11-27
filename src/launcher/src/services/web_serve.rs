@@ -59,6 +59,10 @@ pub fn has_web_build(dir: &str) -> bool {
 /// made under another name (a CLI build without `-o` names its folder after the package, not the
 /// library's output name) whose `build.json` carries the game's title id; else the own folder.
 pub fn played_web_dir(game: &Game) -> String {
+    // an imported nxrs web build (a web game's page is `web_build::imported_page`'s)
+    if !game.web_build.is_empty() && web_build::imported_page(game).is_none() {
+        return game.web_build.clone();
+    }
     let own = web_dir(game);
     if has_web_build(&own) {
         return own;
@@ -75,8 +79,30 @@ pub fn played_web_dir(game: &Game) -> String {
         .unwrap_or(own)
 }
 
+/// The entry can play in the browser: its imported web game's page is there, else its web build is.
+pub fn can_serve(game: &Game) -> bool {
+    match web_build::imported_page(game) {
+        Some(page) => is_file(page),
+        None => has_web_build(&played_web_dir(game)),
+    }
+}
+
+/// An imported web game served from its page's folder, the page at the folder's address.
+pub fn open_site(page: &str) -> Result<Mount, String> {
+    if !is_file(page) {
+        return Err(format!("{}{}", w::NO_PAGE, native(page)));
+    }
+    let root = PathBuf::from(native(&parent(page)));
+    Ok(Mount {
+        data: root.join(c::DATA_SEGMENT),
+        root,
+        entry: crate::model::path_text::file_name(page),
+        translator: String::new(),
+    })
+}
+
 /// `build.json`'s `titleId`, lowercase.
-fn build_title_id(dir: &str) -> Option<String> {
+pub fn build_title_id(dir: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(&read_text(&join(dir, c::BUILD_JSON))?).ok()?;
     Some(v.get("titleId")?.as_str()?.to_ascii_lowercase())
 }
@@ -134,6 +160,18 @@ impl WebServer {
             .map_err(|_| format!("{}{}", w::NO_SERVER, w::NOT_SERVED_TITLE))?;
         m.insert(slug.clone(), mount);
         Ok(web_build::url(self.port, &slug))
+    }
+
+    /// Serves a web game at the root of its own `<slug>.localhost` (replacing an earlier mount of
+    /// it); its address.
+    pub fn mount_site(&self, name: &str, mount: Mount, query: &str) -> Result<String, String> {
+        let slug = web_build::slug(name);
+        let mut m = self
+            .mounts
+            .lock()
+            .map_err(|_| format!("{}{}", w::NO_SERVER, w::NOT_SERVED_TITLE))?;
+        m.insert(super::web_route::site_key(&slug), mount);
+        Ok(web_build::site_url(self.port, &slug, query))
     }
 
     /// The line said when the port asked for was taken.

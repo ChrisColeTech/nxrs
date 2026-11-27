@@ -79,6 +79,7 @@ impl App {
             }
         }
         self.lib.games.retain(|g| g.id != id);
+        crate::services::artwork_store::remove_copies(&self.artwork_folder(), id);
         self.selected.clear();
         self.save();
     }

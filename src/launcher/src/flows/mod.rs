@@ -2,6 +2,7 @@
 //! from this state and turns input into `Action`s; command-line verbs and tests drive it directly.
 mod action;
 mod add;
+mod artwork;
 mod build;
 mod build_finish;
 mod dispatch;
@@ -28,6 +29,7 @@ mod update_probe;
 mod updates;
 pub mod view_state;
 mod web;
+mod web_import;
 
 /// Covers and backgrounds for the gallery's image cache.
 pub use crate::services::artwork_decode::decode as decode_artwork;

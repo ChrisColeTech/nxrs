@@ -11,6 +11,7 @@ pub mod web;
 pub mod words_build;
 pub mod words_contexts;
 pub mod words_dlc;
+pub mod words_import;
 pub mod words_library;
 pub mod words_play;
 pub mod words_settings;

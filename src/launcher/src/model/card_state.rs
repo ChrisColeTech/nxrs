@@ -53,6 +53,10 @@ pub fn card_state(
     if f.update_pending {
         return state(m::REBUILD, w::UPDATE_CHANGED, can_build, true);
     }
+    // nothing native to play, but a web build: nothing needs attention (the card plays it)
+    if f.web_build {
+        return state(m::BUILD, w::READY_WEB, can_build, false);
+    }
     state(
         m::BUILD,
         if f.build_incomplete {
@@ -79,6 +83,8 @@ pub fn status_for(f: &Facts, demo: bool, building: bool, running: bool) -> &'sta
         w::UPDATE_CHANGED_LIST
     } else if f.has_build {
         w::READY
+    } else if f.web_build {
+        w::READY_WEB
     } else {
         w::BUILD_NEEDED
     }

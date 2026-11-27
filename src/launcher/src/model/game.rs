@@ -35,6 +35,9 @@ pub struct Game {
     /// kept in the file as it was (no longer shown)
     pub hints_built: i64,
     pub saves_offered: String,
+    /// an imported web build (`webBuild`): an nxrs web build's folder, or a web game's page; empty:
+    /// the web build is the one this entry builds (`web_build::web_dir`)
+    pub web_build: String,
     /// keys this launcher does not know, written back unchanged
     pub extra: Map<String, Value>,
 }
@@ -65,6 +68,7 @@ impl Default for Game {
             last_built: None,
             hints_built: 0,
             saves_offered: String::new(),
+            web_build: String::new(),
             extra: Map::new(),
         }
     }
@@ -105,6 +109,8 @@ impl Game {
             "DIRECT XCI"
         } else if ends_with_ci(s, ".nro") {
             "HOMEBREW"
+        } else if s.is_empty() && self.build_dir.is_empty() && !self.web_build.is_empty() {
+            "WEB BUILD"
         } else if s.is_empty() {
             "NATIVE BUILD"
         } else {

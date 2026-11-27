@@ -43,6 +43,27 @@ pub const GZIP_SUFFIX: &str = ".gz";
 /// Files: kept by the browser and revalidated by ETag; other answers: not kept.
 pub const CACHE_FILES: &str = "no-cache";
 pub const CACHE_NONE: &str = "no-store";
+/// An imported web game is served at the root of `<slug>.localhost` (Chrome sends every
+/// `*.localhost` to this computer, a secure context like `localhost`; its own origin keeps its
+/// saves apart from every other game's).
+pub const SITE_SUFFIX: &str = ".localhost";
+/// A folder looked into this many levels deep for a web game's page when it has none itself.
+pub const PAGE_DEPTH: usize = 3;
+/// A web game's page, as `index.html` is: what a folder's address serves.
+pub const PAGE_SUFFIXES: [&str; 2] = ["html", "htm"];
+/// A site whose `index.html` only routes to a menu page unless the address names how to start
+/// (`marker` in it) has a direct game link: Play opens `page?query` (the GTA V web port's
+/// `index.html`: `mode === 'story'` goes to `game.html`, anything else to its `launcher.html`).
+pub struct DirectStart {
+    pub marker: &'static str,
+    pub page: &'static str,
+    pub query: &'static str,
+}
+pub const DIRECT_STARTS: [DirectStart; 1] = [DirectStart {
+    marker: "mode === 'story'",
+    page: "game.html",
+    query: "mode=story",
+}];
 /// URL path segment that maps to the build's data folder.
 pub const DATA_SEGMENT: &str = "data";
 

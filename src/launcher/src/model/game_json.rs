@@ -35,6 +35,7 @@ const KNOWN: &[&str] = &[
     "engine",
     "hintsBuilt",
     "savesOffered",
+    "webBuild",
     // a per-game pauseOnFocusLoss (written by a launcher of 382ff33) is not read: the setting is
     // global, and the next save leaves it out
     "pauseOnFocusLoss",
@@ -59,6 +60,10 @@ pub fn to_json(g: &Game) -> Value {
     });
     if let Value::Object(map) = known {
         o.extend(map);
+    }
+    // the launcher's own key, only on an entry with an imported web build (the Qt format otherwise)
+    if !g.web_build.is_empty() {
+        o.insert("webBuild".into(), json!(g.web_build));
     }
     Value::Object(o)
 }
@@ -114,6 +119,7 @@ pub fn from_json(value: &Value) -> Game {
         last_built: dates::parse(&str_of(o, "lastBuilt")),
         hints_built: int_of(o, "hintsBuilt", 0).max(0),
         saves_offered: str_of(o, "savesOffered"),
+        web_build: str_of(o, "webBuild"),
         extra: o
             .iter()
             .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
