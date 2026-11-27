@@ -3782,16 +3782,7 @@ pub fn begin_submit_ex(
         WALK_HELPED_SYNCS.fetch_add(1, Ordering::Relaxed);
     }
     let t_lock = std::time::Instant::now();
-    // (a landing in progress lets a waiting sync go first between its write-backs: `SYNC_WANT`)
-    let mut m = match g.mem.try_lock() {
-        Ok(m) => m,
-        Err(_) => {
-            SYNC_WANT.fetch_add(1, Ordering::AcqRel);
-            let m = g.mem.lock();
-            SYNC_WANT.fetch_sub(1, Ordering::AcqRel);
-            m.unwrap()
-        }
-    };
+    let mut m = g.mem.lock().unwrap();
     // the walker's pages first, and none taken by it while this sync scans and uploads
     let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -4383,20 +4374,6 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
 /// `epoch`: the submission's recording epoch (`upskip::next_epoch`): pages it noted as GPU-written get the hash of the
 /// GPU's bytes back (`upskip::landed`); `value`: its GPU timeline value.
 /// `NXGFX_LAND_PRE=0`: a landing's page compares and hashes are made under the pool lock (`upskip::landing_pre`).
-/// (MKW-SYNC) Submissions' pool syncs waiting for the pool lock (`begin_submit_ex`): a landing between two write-backs
-/// lets them go first (`land_yield_on`).
-static SYNC_WANT: AtomicU64 = AtomicU64::new(0);
-/// Times a landing stepped aside for a sync.
-pub static LAND_YIELDS: AtomicU64 = AtomicU64::new(0);
-
-/// `NXGFX_LAND_YIELD` (default on; 0: off): a landing of several write-backs releases the pool lock between two of
-/// them while a submission's pool sync waits for it. Mario Kart World's replay thread waited ~0.9 ms a frame for the
-/// pool lock at its syncs, much of it behind the completion thread's landings (~2.5 ms a frame under the lock).
-fn land_yield_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_LAND_YIELD").as_deref() != Ok("0"))
-}
-
 fn land_pre_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("NXGFX_LAND_PRE").as_deref() != Ok("0"))
@@ -4420,23 +4397,10 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     let mut m = g.mem.lock().unwrap();
     // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
     // lazy check below sees the walker's pages as pending
-    let mut _watch = watch_lock(&mut m);
+    let _watch = watch_lock(&mut m);
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
     for (i, &(pool, a, n, src, pre, identity)) in wbs.iter().enumerate() {
-        // (MKW-SYNC) a submission's pool sync waits for the lock: it goes first, between two write-backs (each lands
-        // whole; the batch's ranges stay in flight until its end, so that sync holds the CPU writes under them back)
-        if i > 0 && land_yield_on() && SYNC_WANT.load(Ordering::Acquire) > 0 {
-            drop(_watch);
-            drop(m);
-            LAND_YIELDS.fetch_add(1, Ordering::Relaxed);
-            let ty = std::time::Instant::now();
-            while SYNC_WANT.load(Ordering::Acquire) > 0 && ty.elapsed() < std::time::Duration::from_millis(2) {
-                std::thread::yield_now();
-            }
-            m = g.mem.lock().unwrap();
-            _watch = watch_lock(&mut m);
-        }
         // a landing keeps CPU writes it meets as pending (a sync that does not scan visits it for them)
         m.busy.insert(pool);
         let Some(p) = m.by_base.get_mut(&pool) else {
