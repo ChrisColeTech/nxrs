@@ -12,6 +12,7 @@ pub mod filter;
 pub mod game;
 pub mod game_json;
 pub mod game_update;
+pub mod http_range;
 pub mod ini_text;
 pub mod json_fields;
 pub mod library;
@@ -22,8 +23,11 @@ pub mod path_text;
 pub mod play;
 pub mod qtjson;
 pub mod update_text;
+pub mod web_build;
 
 #[cfg(test)]
 mod layout_tests;
 #[cfg(test)]
 mod model_tests;
+#[cfg(test)]
+mod web_tests;

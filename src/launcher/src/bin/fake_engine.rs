@@ -105,6 +105,9 @@ fn build(args: &[String]) -> i32 {
         return 1;
     }
     let root = Path::new(&dir);
+    if args.windows(2).any(|a| a[0] == "--target" && a[1] == "web") {
+        return web_build(root, &name);
+    }
     let exe = if cfg!(windows) {
         format!("{name}.exe")
     } else {
@@ -126,6 +129,20 @@ fn build(args: &[String]) -> i32 {
         )
         .is_ok();
     println!("@result\tok\t{exe}");
+    if made { 0 } else { 1 }
+}
+
+/// `--target web`: a web folder as nxrs-build writes it (page, module, `build.json`, data folder).
+fn web_build(root: &Path, name: &str) -> i32 {
+    let json = format!(
+        r#"{{"format":1,"kind":"nxrs-web","title":"{name}","entry":"index.html","data":"{name}_data"}}"#
+    );
+    let made = std::fs::create_dir_all(root.join(format!("{name}_data/romfs"))).is_ok()
+        && std::fs::write(root.join(format!("{name}_data/romfs/a.bin")), b"0123456789").is_ok()
+        && std::fs::write(root.join("index.html"), b"<!doctype html>fake page").is_ok()
+        && std::fs::write(root.join("game.wasm"), b"\0asm fake").is_ok()
+        && std::fs::write(root.join("build.json"), json).is_ok();
+    println!("@result\tok\t{}", root.join("game.js").display());
     if made { 0 } else { 1 }
 }
 

@@ -13,6 +13,8 @@ pub struct Facts {
     /// their data); a build with its own copy of the data never needs the source
     pub in_place: bool,
     pub build_incomplete: bool,
+    /// its web folder holds a finished web build (`build.json` and the module): Play in browser
+    pub web_build: bool,
 }
 
 impl Facts {

@@ -17,6 +17,8 @@ impl App {
             Action::Play => self.play(),
             Action::Stop => self.stop(),
             Action::Build => self.start_build(),
+            Action::BuildWeb => self.start_web_build(),
+            Action::PlayWeb => self.play_in_browser(),
             Action::Properties(tab) => self.show_properties(tab),
             Action::InstallDlc => self.show_dlc(),
             Action::InstallUpdates => self.show_updates(),

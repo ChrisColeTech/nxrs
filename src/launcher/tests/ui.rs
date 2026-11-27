@@ -47,6 +47,7 @@ fn game_menu_installs_dlc() {
         "Play",
         "Stop",
         "Build",
+        "Build for web",
         "-",
         "Install DLC…",
         "Install Updates…",

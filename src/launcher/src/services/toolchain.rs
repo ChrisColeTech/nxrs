@@ -18,6 +18,8 @@ pub struct Toolchain {
     pub nxrs_version: String,
     pub nxrs_contract: i64,
     pub keys: String,
+    /// the browser Play in browser opens (looked for with nxrs-build, off the UI thread)
+    pub browser: Option<super::browser::Browser>,
 }
 
 /// A file, or the nxrs-build inside a folder; empty when neither.
@@ -46,6 +48,7 @@ impl Toolchain {
     pub fn find(chosen: &str, keys: &str) -> Toolchain {
         let mut t = Toolchain {
             keys: keys.to_string(),
+            browser: super::browser::find(),
             ..Toolchain::default()
         };
         let bundled = join(&app_dir(), e::BUNDLED_FOLDER);

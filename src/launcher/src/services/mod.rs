@@ -1,6 +1,7 @@
 //! Everything that touches the disk, other processes or the OS. The model decides; these read, write,
 //! spawn and watch.
 pub mod artwork_decode;
+pub mod browser;
 pub mod build_facts;
 pub mod build_move;
 pub mod data_dir;
@@ -23,6 +24,8 @@ pub mod sources;
 pub mod startup_log;
 pub mod toolchain;
 pub mod update_files;
+pub mod web_reply;
+pub mod web_serve;
 
 #[cfg(test)]
 mod dlc_tests;

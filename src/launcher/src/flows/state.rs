@@ -10,6 +10,7 @@ use crate::model::library::Library;
 use crate::services::jobs::Notify;
 use crate::services::library_file::Store;
 use crate::services::toolchain::Toolchain;
+use crate::services::web_serve::WebServer;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -58,6 +59,8 @@ pub struct App {
     pub scroll_to_selected: bool,
     /// counts F5 and artwork changes: the UI's image cache is dropped when it moves
     pub artwork_epoch: u64,
+    /// serves web builds to the browser; started at the first Play in browser
+    pub(super) web_server: Option<WebServer>,
 }
 
 impl App {
@@ -98,6 +101,7 @@ impl App {
             doctor_running: false,
             scroll_to_selected: true,
             artwork_epoch: 0,
+            web_server: None,
         }
     }
 }

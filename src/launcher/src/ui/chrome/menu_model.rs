@@ -1,7 +1,8 @@
-//! The menus' entries and their enabled states (`createMenusAndToolbar`, `refreshSelection`,
-//! `showContextMenu`).
+//! The menus' entries (`createMenusAndToolbar`, `showContextMenu`); their enabled states are
+//! `menu_enabled`'s.
 
-use crate::constants::menus as m;
+pub use super::menu_enabled::{Enabled, enabled};
+use crate::constants::{menus as m, words_web as w};
 use crate::flows::{Action, App};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,42 +36,12 @@ fn check(label: &str, checked: bool, action: Action) -> Item {
     }
 }
 
-/// What the selected game's commands can do now.
-pub struct Enabled {
-    pub play: bool,
-    pub build: bool,
-    pub stop: bool,
-    pub stop_label: &'static str,
-    pub exists: bool,
-    pub remove: bool,
-    pub per_game: bool,
-    pub save_folder: bool,
-    pub log: bool,
-}
-
-pub fn enabled(app: &App) -> Enabled {
-    let id = app.selected_id();
-    let f = id.as_deref().map(|i| app.facts_of(i)).unwrap_or_default();
-    let (playing, building) = id
-        .as_deref()
-        .map_or((false, false), |i| (app.is_running(i), app.is_building(i)));
-    let exists = id.is_some();
-    Enabled {
-        play: exists && !app.demo && f.playable() && !playing && !building,
-        build: exists
-            && !app.demo
-            && !app.builder_busy()
-            && !playing
-            && f.source_available
-            && app.tools.can_build()
-            && !f.playable(),
-        stop: building || playing,
-        stop_label: if building { m::CANCEL_BUILD } else { m::STOP },
-        exists,
-        remove: exists && !playing && !building,
-        per_game: exists && !app.demo,
-        save_folder: exists && f.has_build,
-        log: app.has_log(),
+/// Play in browser, when it is shown.
+fn play_web(e: &Enabled) -> Vec<Item> {
+    if e.play_web {
+        vec![cmd(w::PLAY_WEB, "", true, Action::PlayWeb)]
+    } else {
+        Vec::new()
     }
 }
 
@@ -95,16 +66,21 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
             Item::Separator,
             cmd(m::EXIT, m::KEY_EXIT, true, Action::Exit),
         ],
-        "Game" => vec![
-            cmd(m::PLAY, "", e.play, Action::Play),
-            cmd(e.stop_label, "", e.stop, Action::Stop),
-            cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
-            Item::Separator,
-            cmd(m::INSTALL_DLC, "", e.per_game, Action::InstallDlc),
-            cmd(m::INSTALL_UPDATES, "", e.per_game, Action::InstallUpdates),
-            Item::Separator,
-            cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
-        ],
+        "Game" => [
+            vec![cmd(m::PLAY, "", e.play, Action::Play)],
+            play_web(&e),
+            vec![
+                cmd(e.stop_label, "", e.stop, Action::Stop),
+                cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
+                cmd(w::BUILD_WEB, "", e.build_web, Action::BuildWeb),
+                Item::Separator,
+                cmd(m::INSTALL_DLC, "", e.per_game, Action::InstallDlc),
+                cmd(m::INSTALL_UPDATES, "", e.per_game, Action::InstallUpdates),
+                Item::Separator,
+                cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
+            ],
+        ]
+        .concat(),
         "Keys" => vec![
             cmd(m::INSTALL_KEYS, "", true, Action::InstallKeys),
             cmd(m::KEYS_FOLDER, "", true, Action::OpenKeysFolder),
@@ -141,9 +117,11 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
 /// The game context menu of the gallery and the list.
 pub fn context(app: &App) -> Vec<Item> {
     let e = enabled(app);
-    vec![
-        cmd(m::PLAY, "", e.play, Action::Play),
+    let mut items = vec![cmd(m::PLAY, "", e.play, Action::Play)];
+    items.extend(play_web(&e));
+    items.extend([
         cmd(app.build_label(), m::KEY_BUILD, e.build, Action::Build),
+        cmd(w::BUILD_WEB, "", e.build_web, Action::BuildWeb),
         cmd(
             m::PROPERTIES,
             m::KEY_PROPERTIES,
@@ -156,7 +134,8 @@ pub fn context(app: &App) -> Vec<Item> {
         cmd(m::GAME_LOG, "", e.log, Action::ViewGameLog),
         Item::Separator,
         cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
-    ]
+    ]);
+    items
 }
 
 /// The Add game button's drop-down.
