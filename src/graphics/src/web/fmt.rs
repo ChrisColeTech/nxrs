@@ -130,6 +130,8 @@ fn tex_base(f: vk::Format) -> Option<Tex> {
         F::D32_SFLOAT => ds("depth32float", 4, true, false),
         F::X8_D24_UNORM_PACK32 => ds("depth24plus", 4, true, false),
         F::D32_SFLOAT_S8_UINT => ds("depth32float-stencil8", 8, true, true),
+        // renders and samples; WebGPU copies neither of its aspects (a copy of one is refused with a red line)
+        F::D24_UNORM_S8_UINT => ds("depth24plus-stencil8", 4, true, true),
         F::S8_UINT => ds("stencil8", 1, false, true),
         F::BC1_RGBA_UNORM_BLOCK | F::BC1_RGB_UNORM_BLOCK => bc("bc1-rgba-unorm", 8),
         F::BC1_RGBA_SRGB_BLOCK | F::BC1_RGB_SRGB_BLOCK => bc("bc1-rgba-unorm-srgb", 8),

@@ -43,6 +43,10 @@
   globalThis.NXRS_GPU = {
     canvas,
     stats: {},
+    // development: asks the worker for its ring header words (into NXRS_GPU.stats)
+    ask() {
+      if (NXRS_GPU.worker) NXRS_GPU.worker.postMessage({ ask: 1 });
+    },
     start(memory, ring) {
       if (started) return;
       started = true;

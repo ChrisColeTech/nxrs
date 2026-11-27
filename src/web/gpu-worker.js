@@ -44,6 +44,11 @@ function bytes(addr, n) {
 
 onmessage = async (e) => {
   const m = e.data;
+  // development: the ring header's words (NXRS_GPU.ask() on the page)
+  if (m.ask) {
+    postMessage({ stats: H ? Array.from(H.slice(0, 24)) : [] });
+    return;
+  }
   memory = m.memory;
   ringAddr = m.ring;
   shotEvery = m.shotEvery | 0;
@@ -291,6 +296,8 @@ function createView(j) {
   const t = objs.get(j.tex);
   if (!t) return false;
   const d = { format: j.format, dimension: j.dim, baseMipLevel: j.baseMip, mipLevelCount: j.mips, aspect: j.aspect };
+  // a one-aspect view of a depth-stencil texture takes that aspect's format (WebGPU resolves it when left out)
+  if (j.aspect !== 'all') delete d.format;
   if (j.dim !== '3d') {
     d.baseArrayLayer = j.baseLayer;
     d.arrayLayerCount = j.layers;
@@ -493,7 +500,13 @@ function submit(p0, len) {
         case OP.COPY_B2B: {
           const s = objs.get(u32(a)), so = u64(a + 4), d = objs.get(u32(a + 12)), dof = u64(a + 16), size = u64(a + 24);
           if (s && d && size) {
-            enc.copyBufferToBuffer(s, so, d, dof, size);
+            if (s === d) {
+              // WebGPU copies between two buffers only: within one, through a temporary
+              const tmp = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+              temps.push(tmp);
+              enc.copyBufferToBuffer(s, so, tmp, 0, size);
+              enc.copyBufferToBuffer(tmp, 0, d, dof, size);
+            } else enc.copyBufferToBuffer(s, so, d, dof, size);
             used = true;
           }
           break;

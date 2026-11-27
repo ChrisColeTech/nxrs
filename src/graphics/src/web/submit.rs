@@ -1156,6 +1156,10 @@ impl<'a> Rs<'a> {
                 (r.image_subresource.base_array_layer, r.image_subresource.layer_count)
             };
             let aspect = aspect_code(r.image_subresource.aspect_mask, im);
+            if !buffer_copy_ok(&t, aspect, true) {
+                red_once(&format!("a copy into {} ({:?}): WebGPU copies none into it, not copied", t.name, r.image_subresource.aspect_mask));
+                continue;
+            }
             if host.is_null() {
                 self.put(op::COPY_B2T, |p| {
                     p.u32(bid).u64(r.buffer_offset).u32(bpr).u32(rpi);
@@ -1191,8 +1195,12 @@ impl<'a> Rs<'a> {
             };
             let total = bpr as u64 * rpi as u64 * (d.max(1) as u64 - 1) + bpr as u64 * (h.div_ceil(t.bh) as u64 - 1)
                 + w.div_ceil(t.bw) as u64 * t.bytes as u64;
-            let Some((bid, _)) = self.buf_write(dst, r.buffer_offset, total) else { continue };
             let aspect = aspect_code(r.image_subresource.aspect_mask, &im);
+            if !buffer_copy_ok(&t, aspect, false) {
+                red_once(&format!("a copy out of {} ({:?}): WebGPU copies none out of it, not copied", t.name, r.image_subresource.aspect_mask));
+                continue;
+            }
+            let Some((bid, _)) = self.buf_write(dst, r.buffer_offset, total) else { continue };
             self.put(op::COPY_T2B, |p| {
                 p.u32(im.id).u32(r.image_subresource.mip_level).u32(r.image_offset.x as u32).u32(r.image_offset.y as u32).u32(z);
                 p.u32(w).u32(h).u32(d.max(1)).u32(aspect);
@@ -1291,6 +1299,22 @@ fn apply_static(d: &mut Dyn, g: &obj::Gfx) {
     if !dy(D::VERTEX_INPUT_EXT) {
         d.vbind = s.vbind.clone();
         d.vattr = s.vattr.clone();
+    }
+}
+
+/// Whether WebGPU copies this aspect of the texture between it and a buffer (`into`: buffer to texture): depth is
+/// written only into depth16unorm and read only from depth16unorm / depth32float(-stencil8); stencil both ways; a
+/// combined depth-stencil texture one aspect at a time.
+fn buffer_copy_ok(t: &fmt::Tex, aspect: u32, into: bool) -> bool {
+    if !t.depth && !t.stencil {
+        return true;
+    }
+    match aspect {
+        2 => t.stencil,
+        _ if t.depth && t.stencil && aspect == 0 => false,
+        _ if !t.depth => true,
+        _ if into => t.name == "depth16unorm",
+        _ => matches!(t.name, "depth16unorm" | "depth32float" | "depth32float-stencil8"),
     }
 }
 
