@@ -292,14 +292,18 @@ fn version_of(path: &Path) -> Result<(String, String)> {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    // where the toolchain is unpacked is not what an object depends on: llvm-mingw and the bundled Linux clang print
-    // their folder in InstalledDir and in the configuration file's path
-    let id = text
+    Ok((version, toolchain_id(&text)))
+}
+
+/// What an object depends on of `clang --version`: where the toolchain is unpacked is not (llvm-mingw and the bundled
+/// Linux clang print their folder in InstalledDir and in their configuration file's path), so a moved release keeps
+/// its objects.
+fn toolchain_id(version_text: &str) -> String {
+    version_text
         .lines()
         .filter(|l| !l.starts_with("InstalledDir:") && !l.starts_with("Configuration file:"))
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok((version, id))
+        .join("\n")
 }
 
 fn which(exe: &str) -> Option<PathBuf> {
@@ -1524,6 +1528,20 @@ mod tests {
             "the C is in the key"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn toolchain_id_leaves_out_where_the_toolchain_is_unpacked() {
+        let at = |dir: &str| {
+            format!(
+                "clang version 23.1.5 (https://github.com/llvm/llvm-project.git 392dfff)\nTarget: x86_64-w64-windows-gnu\n\
+                 Thread model: posix\nInstalledDir: {dir}/bin\nConfiguration file: {dir}/bin/x86_64-w64-windows-gnu.cfg\n"
+            )
+        };
+        let a = toolchain_id(&at("C:/a/nxrs/toolchain/llvm-mingw"));
+        assert_eq!(a, toolchain_id(&at("D:/elsewhere/llvm-mingw")));
+        assert!(a.contains("clang version 23.1.5") && a.contains("x86_64-w64-windows-gnu"));
+        assert!(!a.contains("toolchain"));
     }
 
     #[test]

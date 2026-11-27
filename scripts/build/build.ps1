@@ -6,7 +6,7 @@
   nxrt.lib, and the same engine for x86_64-pc-windows-gnullvm with the bundled llvm-mingw) and of the
   launcher (src/launcher, its own workspace, building into the same target/), and assembles dist/nxrs as
   a release is laid out:
-    nxrs.exe                 the launcher
+    nxrs.exe                 the launcher (vcruntime140*.dll, msvcp140.dll beside it, nxrs-build and spirv-val)
     nxrs-engine/             nxrs-build.exe, engine.json (its contract), nxfront.lib + nxrt.lib, tools/
                              (dmsh_xlate, spirv-val), gnu/ (libnxfront.a, libnxrt.a, libwindows.0.52.0.a)
     toolchain/llvm-mingw/    the compiler and linker games are built with on a machine without Visual
@@ -80,11 +80,14 @@ try {
         try {
             $env:PATH = "$(Join-Path $llvm 'bin');$path"
             $env:CC_x86_64_pc_windows_gnullvm = 'x86_64-w64-mingw32-clang'
+            # no line tables: ld.lld would keep them as DWARF in every game DLL (lld-link drops the MSVC engine's, no
+            # PDB is written), so the libraries and each game would be twice the size for nothing
+            $env:CARGO_PROFILE_RELEASE_DEBUG = '0'
             cargo build --release --locked --jobs $Jobs --target-dir $target --target x86_64-pc-windows-gnullvm -p front -p runtime
             if ($LASTEXITCODE -ne 0) { throw "gnullvm engine build failed ($LASTEXITCODE)" }
         } finally {
             $env:PATH = $path
-            Remove-Item Env:CC_x86_64_pc_windows_gnullvm -ErrorAction SilentlyContinue
+            Remove-Item Env:CC_x86_64_pc_windows_gnullvm, Env:CARGO_PROFILE_RELEASE_DEBUG -ErrorAction SilentlyContinue
         }
     }
 } finally { Pop-Location }
@@ -102,6 +105,17 @@ Copy-Item (Join-Path $release 'nxrs.exe') $dist
 foreach ($file in 'nxrs-build.exe', 'nxfront.lib', 'nxrt.lib') { Copy-Item (Join-Path $release $file) $engine }
 Copy-Item $xlate (Join-Path $engine 'tools')
 Copy-Item $spirv (Join-Path $engine 'tools')
+
+# the Visual C++ runtime that nxrs.exe, nxrs-build.exe and spirv-val.exe load (VCRUNTIME140, MSVCP140), app-local
+# beside each: Windows has the UCRT but not this, and a PC without the Visual C++ Redistributable must run them
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+$crt = Get-ChildItem (Join-Path "$vs" 'VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT') -Directory -ErrorAction SilentlyContinue |
+    Sort-Object FullName | Select-Object -Last 1
+if (-not $crt) { throw "missing the Visual C++ runtime to ship (VC\Redist\MSVC\<version>\x64\Microsoft.VC14x.CRT under $vs)" }
+foreach ($dir in $dist, $engine, (Join-Path $engine 'tools')) {
+    foreach ($dll in 'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') { Copy-Item (Join-Path $crt.FullName $dll) $dir }
+}
 
 # the gnullvm engine and the bundled llvm-mingw it links with: games build without Visual Studio or LLVM
 $gnu = Join-Path $target 'x86_64-pc-windows-gnullvm\release'
