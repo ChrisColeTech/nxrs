@@ -86,6 +86,31 @@ thread's (which holds the pool lock the replay thread then waits for). Next: the
   runs 18:35-18:48), the replay thread's copy and hash 4.8 -> 6.2 ms a frame: the landing's compares took the
   `vk page hash` threads from the replay thread's sync. Corrected (change 2 off those threads). Its profile was not
   written (the run ended at 913 s, inside the sampled stretch).
+- `20261126-185414-od-v4-oot` (changes 1-3, change 2 on its own threads; profile [700, 720] s, the house before the
+  window): 6/6 on route, **17.8 / 13.0 FPS**, frame 55.4 ms, replay 22.2, prep 15.2 (pool sync 11.9 = lock 1.9 /
+  scan 3.0 / pass 5.8), completion write-back 1.1 MB in **6.2 ms** (was 11.9), GPU 9.9; still held 3 vsyncs for all
+  1,800 frames. Profile, replay thread: `submit_sub` 15.3 % of which **12.3 % still making buffers**: the shelf's
+  256 MB cap held while 64 MB write-backs were in flight (~one made a frame in the house); contended locks 18.3 ->
+  6.8 %; idle 20 %, waiting for the lanes at joins ~6 %. Completion: landing compares before the lock 12.7 %, under
+  it ~13 %. Sheets (3) read: all correct.
+- `20261126-191140-od-v5-oot` (+ 1 GB shelf, merged dirty ranges; profile [700, 720] s): 6/6 on route, **17.5 / 11.0
+  FPS**, frame 56.8 ms, replay 27.7, prep 14.7 (pool sync 11.1 = 1.5 / 2.6 / 5.8), write-back 6.1 ms, GPU 9.7;
+  `descriptor_ms` 43 (lanes; other waves compiled throughout). Profile, replay thread: `submit_sub` **2.4 %** (no
+  buffer made in the house), contended locks 9.6 %, **idle 16.5 % in the replay queue and 14.1 % waiting at
+  `par::run` joins for the lanes**, `begin_submit_ex` 25 % (upload skip 10.4 %: its serial page hashing 5.5 %, image
+  prep 8.2 %: two walks over all ~6,700 images per submission), translation `record` 25 %. Sheets read: correct;
+  `23-walk3` shows the camera pressed into the bed's canopy beside the door (stretched thatch along the top; the
+  walk's timing differs run to run, no other shot shows it): judged camera clipping, to be watched in the house runs.
+- `20261126-192933-od-v6-oot` (+ prehash of the scan's pages; profile [700, 720] s of the replay thread and lanes):
+  6/6 on route, but **12.2 / 7.0 FPS** with the translation inflated from 840 s on (replay 50-61 ms, `descriptor_ms`
+  117-166 summed over the lanes, in 15 s bins; 700-840 s: replay 23-31, descriptor 25-40) while other waves compiled;
+  [700, 720]: 18.6 FPS, frame 53.8, replay 23.3, prep 14.0. Profile: the replay thread **idle 30.7 % in the replay
+  queue** and 10.2 % at lane joins; `page_hash` still 4.9 %: prehash hashed almost nothing (`taken` was empty at most
+  syncs, see change 5); the lanes 88.6 % idle.
+- `20261126-194802-od-v7-oot` (+ pending pages prehashed, one image walk): **invalid, stopped by PID at ~750 s**: at
+  555.8 s the swapchain was recreated at 1164x764 (the window was resized from outside), and from there every present
+  took ~500 ms (2.0 FPS; the replay thread 91 % inside `vkQueuePresentKHR`). Not this wave's change (the window's size
+  is not touched by it); its profile is of the throttled presents only.
 
 ## Changes
 
@@ -108,3 +133,20 @@ thread's (which holds the pool lock the replay thread then waits for). Next: the
    same range again (same pool generation, identity) already holds that write-back; the note returns before `g.mem`.
    Keyed by the recording's serial (unique per `make_sub`, children included), so no other recording matches.
    `NXGFX_NOTE_MEMO=0`: as before.
+4. **Image prep merges the dirty ranges** (`image.rs` `image_begin_submit`, `merge_ranges`): the pool sync hands each
+   pool's CPU-written ranges in pool (hash-map) order, so the "sorted" test failed at every sync and the slow path ran:
+   a `by_addr` range scan per dirty range over the largest texture's span, and for every texture hit a filter over
+   all dirty ranges (6 % of the replay thread's samples, self time, in `od-v4-oot`'s profile). They are sorted and
+   merged first (the same bytes, each once), so the sorted paths run.
+5. **A sync's written pages hashed at once** (`upskip::prehash`, `mem::begin_submit_ex`): after the scan, every page it
+   found written is hashed on the `vk page hash` threads in one job; `upload_changed` decides on those hashes instead of
+   hashing each small range's candidates on the replay thread (ranges under 4 MB were hashed there alone: `page_hash`
+   8 % of the replay thread). The hashes only decide skips, are taken after the scan reset the pages' write watch (a
+   later store is found by the next scan, as with `par_hashes`), and are dropped at the end of the sync.
+   `NXGFX_PREHASH=0`: as before. First cut hashed only the scan's own pages (`od-v6-oot`: prehash idle, the serial
+   hashing unchanged): most of OoT's written pages reach a sync through the pool walker's walks, drained into the
+   pools' `pending`, with no scan of the sync's own; the pending pages of the pools the sync visits are hashed too.
+6. **One walk over the images per submission** (`image_begin_submit`): the sparse-texture check and the collection of
+   images due were two walks over every image (~6,700) at each of ~11 submissions a frame; one walk does both.
+7. **Diagnosis:** the frame step's summary line (`os/fstep.rs`, every 1,800 presents) gives the frames' cost: median,
+   90th percentile, and the share fitting 1 / 2 / 3 vsyncs.
