@@ -15,7 +15,8 @@
 //! * `k` follows the cost: three late frames in a row step up to the cheapest of them, when the frames at `k` also
 //!   fall short of it on average (`LATE` over the last `RUN` frames, the longest left out: one stall is not a rate,
 //!   nxnative issue #1823, Mario Kart World's near-misses); `RUN` frames on time whose cost fits `k − 1` try it, a
-//!   trial that fails waits twice as long before the next (1 s → 8 s). A GPU whose clock falls with a longer hold
+//!   trial that fails waits twice as long before the next (1 s → 8 s; with the retry rule, `NXOS_FSTEP_RETRY`, every
+//!   trial waits 0.5 s). A GPU whose clock falls with a longer hold
 //!   (`Fgpu`) starts a probe straight back to `kmin`, with a grace while its clock rises.
 //! * The target fps sets the shortest hold: 60 → 1, 30 → 2 (`fps_target`, `NXOS_FPS_TARGET`; 0 turns it off). The
 //!   profile's `fps_hold` off keeps the hold at the target's vsyncs (late frames never raise it).
@@ -50,6 +51,13 @@ pub const PROBE_MAX: i32 = 180;
 pub const WIN: u32 = 60;
 /// The share rule's default (`NXOS_FSTEP_SHARE`, percent of the window; 0 = 30 frames in a row).
 pub const SHARE: u32 = 75;
+/// The retry rule (`NXOS_FSTEP_RETRY`, default on): the hold-off before every trial, failed ones too (0.5 s), and the
+/// frames at the longer hold the share rule judges a trial on (instead of `WIN`).
+pub const RETRY_HOLD: f64 = 30.0;
+pub const RETRY_WIN: u32 = 20;
+/// With the retry rule, a hold is left for a longer one only when its frames run this many vsyncs past it on average
+/// (instead of `LATE`): the rate is nearer the longer hold's than its own.
+pub const RETRY_SHORT: f64 = 0.5;
 
 /// The controller (nxnative `nvn_fstep`).
 #[derive(Clone, Debug, Default)]
@@ -104,6 +112,12 @@ pub struct Fstep {
     /// than this share of them are on time (besides three late in a row and the rate short of k). Frames over budget
     /// are shown late and paid back by the step, so game time stays real time.
     pub share: u32,
+    /// The retry rule (`NXOS_FSTEP_RETRY`): a failed trial does not double the hold-off (1 s → 8 s at the longer hold
+    /// pinned Mario Kart World's 5 % low at 30); every trial waits `RETRY_HOLD` and, with the share rule, `RETRY_WIN`
+    /// frames at the longer hold. A trial that fails costs a few late frames, shown late and paid back. A hold is left
+    /// for a longer one only when its frames run `RETRY_SHORT` past it on average (MKW's heavy-draw frames of 19-21 ms
+    /// stay at 1 vsync, ~50 FPS, instead of 30).
+    pub retry: bool,
     /// the window's frames at hold `win_k`: bit i set = frame fit k − 1 (`win_down`) / was on time (`win_ok`)
     win_down: u64,
     win_ok: u64,
@@ -144,7 +158,10 @@ impl Fstep {
         } else {
             1.0
         };
-        let (hold0, hold_max) = (HOLD0 * pv, HOLD_MAX * pv);
+        let (hold0, hold_max) = (
+            if self.retry { RETRY_HOLD } else { HOLD0 } * pv,
+            HOLD_MAX * pv,
+        );
         let smax = if self.smax > 0 && self.smax < MAX {
             self.smax
         } else {
@@ -300,7 +317,10 @@ impl Fstep {
         }
         // a rate below k over the last RUN frames, the longest left out
         let omax = self.over.iter().cloned().fold(0.0f64, f64::max);
-        let short_of_k = self.no_payback || self.over_sum - omax > LATE * RUN as f64;
+        // (the retry rule: short by half a vsync a frame, i.e. a rate nearer k + 1 than k: frames between are shown late
+        // and paid back, more of them than the longer hold would show)
+        let short_by = if self.retry { RETRY_SHORT } else { LATE };
+        let short_of_k = self.no_payback || self.over_sum - omax > short_by * RUN as f64;
         // the share rule: k is kept while enough of the window is on time (the rest shown late, paid back)
         let share_short = self.share == 0 || self.no_payback || !self.share_ok();
         if self.late_run >= 3 && self.k < kmax && short_of_k && share_short {
@@ -312,7 +332,11 @@ impl Fstep {
             if self.trial > 0 || self.tpend || (self.probe == 2 && self.since < hold_max) {
                 self.failed += 1;
                 self.trial = 0;
-                self.holdoff = (self.holdoff * 2.0).min(hold_max);
+                self.holdoff = if self.retry {
+                    hold0
+                } else {
+                    (self.holdoff * 2.0).min(hold_max)
+                };
             } else if self.probe == 2 {
                 self.holdoff = hold0; // the probe's run at kmin lasted
             }
@@ -403,7 +427,8 @@ impl Fstep {
 
     /// A whole window at this hold, at least `share` % of it fitting the next shorter hold.
     fn share_down(&self) -> bool {
-        self.win_n == WIN && self.win_down.count_ones() * 100 >= self.share * WIN
+        let n = if self.retry { RETRY_WIN } else { WIN };
+        self.win_n >= n && self.win_down.count_ones() * 100 >= self.share * self.win_n
     }
 
     fn start_probe(&mut self) {
@@ -622,9 +647,18 @@ pub fn init(page: u64, data: &std::path::Path) {
             "frame step: share rule: a shorter hold is tried when {share} % of {WIN} frames fit it and kept while {share} % are on time (NXOS_FSTEP_SHARE=0: {RUN} frames in a row)"
         );
     }
+    let retry = std::env::var("NXOS_FSTEP_RETRY").as_deref() != Ok("0");
+    if retry {
+        crate::log!(
+            "frame step: retry rule: every trial of a shorter hold waits {:.1} s and {RETRY_WIN} frames at the longer hold, failed ones too; a hold is left only when its frames run {RETRY_SHORT} vsyncs past it on average (NXOS_FSTEP_RETRY=0: doubled after each failed trial up to {:.0} s, left at {LATE})",
+            RETRY_HOLD / 60.0,
+            HOLD_MAX / 60.0
+        );
+    }
     let fs = Fstep {
         smax,
         share,
+        retry,
         ..Default::default()
     };
     crate::log!(
@@ -1121,6 +1155,64 @@ mod tests {
                 && m.s.failed >= 3,
             "{gaps:?}"
         );
+    }
+
+    /// MKW-HEAVY: the retry rule (`NXOS_FSTEP_RETRY`) with the share rule. A heavy stretch whose frames miss hold 1 by a
+    /// little (19.7 ms, as MKW's 2,200-2,500-draw frames) keeps hold 1, the late frames paid back (the old rule: 30 FPS
+    /// and trials 1 → 8 s apart). A stretch of 28 ms frames goes to hold 2 and tries hold 1 again every ~0.7 s instead of
+    /// 1 → 8 s; when the stretch ends, hold 1 comes back within a second; game time stays real time.
+    #[test]
+    fn the_retry_rule_keeps_near_misses_and_tries_again_soon() {
+        let mk = |retry: bool| Sim {
+            s: Fstep {
+                share: 75,
+                retry,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut m = mk(true);
+        m.run(120, 0.5, 1, 3, 0);
+        m.run(1200, 1.18, 1, 3, 0);
+        assert!(m.s.k == 1 && m.s.ups == 0 && m.balanced() && m.s.paid > 0, "19.7 ms: hold 1, paid back");
+        let mut old = mk(false);
+        old.run(120, 0.5, 1, 3, 0);
+        old.run(1200, 1.18, 1, 3, 0);
+        assert!(old.s.k == 2 && old.s.ups >= 1, "old: 30 FPS");
+        let heavy = |m: &mut Sim| {
+            m.run(120, 0.5, 1, 3, 0);
+            let (mut gaps, mut last, mut downs) = (vec![], 0.0, 0);
+            let start = m.real;
+            while m.real - start < 1200.0 {
+                let w = if m.s.k == 1 { 1.7 } else { 0.6 };
+                m.run(1, w, 1, 3, 0);
+                if m.s.downs != downs {
+                    downs = m.s.downs;
+                    gaps.push(m.real - last);
+                    last = m.real;
+                }
+            }
+            gaps
+        };
+        let mut old = mk(false);
+        let g_old = heavy(&mut old);
+        let mut m = mk(true);
+        let g = heavy(&mut m);
+        assert!(g_old.len() <= 5 && g_old.iter().any(|&x| x >= 480.0), "old: doubled to 8 s {g_old:?}");
+        assert!(
+            g.len() >= 10 && g.iter().skip(1).all(|&x| x <= 100.0),
+            "retry: a trial every ~1-1.7 s ({} trials) {g:?}",
+            g.len()
+        );
+        assert!(m.balanced() && old.balanced(), "game time = real time");
+        // the stretch ends: hold 1 again within a second
+        let at = m.real;
+        while m.s.k != 1 {
+            m.run(1, 0.6, 1, 3, 0);
+        }
+        assert!(m.real - at <= 60.0, "back at hold 1 after {} vsyncs", m.real - at);
+        m.run(600, 0.6, 1, 3, 0);
+        assert!(m.s.k == 1 && m.balanced());
     }
 
     #[test]

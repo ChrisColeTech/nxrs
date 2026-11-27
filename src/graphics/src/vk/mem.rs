@@ -2529,6 +2529,9 @@ pub static WATCH_LUKE_HITS: AtomicU64 = AtomicU64::new(0);
 pub static SYNC_LOCK_NS: AtomicU64 = AtomicU64::new(0);
 pub static SYNC_SCAN_NS: AtomicU64 = AtomicU64::new(0);
 pub static SYNC_LOOP_NS: AtomicU64 = AtomicU64::new(0);
+/// Syncs that let finished landings go first (`queue::land_first`), and their wait.
+pub static LAND_FIRST_N: AtomicU64 = AtomicU64::new(0);
+pub static LAND_FIRST_NS: AtomicU64 = AtomicU64::new(0);
 /// Pool syncs by the submission that asked: a stream's replay, a present, a one-off (texel reads, tools, decodes)
 pub static SYNC_BY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 struct SyncLoopTimer(std::time::Instant);
@@ -3826,6 +3829,12 @@ pub fn begin_submit_ex(
     if helped {
         WALK_HELPED_SYNCS.fetch_add(1, Ordering::Relaxed);
     }
+    // landings the GPU has finished go first: the game may be waiting for their fence (`queue::land_first`)
+    let lf = super::queue::land_first(g);
+    if lf > 0 {
+        LAND_FIRST_NS.fetch_add(lf, Ordering::Relaxed);
+        LAND_FIRST_N.fetch_add(1, Ordering::Relaxed);
+    }
     let t_lock = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // the walker's pages first, and none taken by it while this sync scans and uploads
@@ -4736,8 +4745,12 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
     let held = WB_HELD_B.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let held_n = WB_DEFERRED.swap(0, Ordering::Relaxed) as f64 / f;
     let deferred = DEFERRED_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
+    let (lfn, lfms) = (
+        LAND_FIRST_N.swap(0, Ordering::Relaxed) as f64 / f,
+        t(&LAND_FIRST_NS),
+    );
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan, {resumes:.1} of them parked work run on; {at_once:.1} submits a frame parked at their first wait (no sync); CPU writes held back a frame: {held:.2} MB under in-flight write-backs ({held_n:.1} syncs), {deferred:.2} MB past the upload budget",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: landings first {lfn:.2} syncs, {lfms:.3} ms (NXGFX_LAND_FIRST), lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan, {resumes:.1} of them parked work run on; {at_once:.1} submits a frame parked at their first wait (no sync); CPU writes held back a frame: {held:.2} MB under in-flight write-backs ({held_n:.1} syncs), {deferred:.2} MB past the upload budget",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
