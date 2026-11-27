@@ -29,3 +29,15 @@ pub const NO_DATA: &str = "build.json names no data folder";
 pub const NO_DATA_DIR: &str = "the data folder is missing: ";
 pub const NO_BUILD_JSON: &str = "no build.json (build it for web again)";
 pub const DEFAULT_BROWSER: &str = "the default browser";
+
+/// The shader translation route's answers (the page puts them in its red line).
+pub const NO_TRANSLATOR: &str = "this server has no nxrs-build to translate shaders with";
+pub const BAD_SHADER_REQUEST: &str = "not a shader request (u32 ctl length, ctl, code)";
+pub const XLATE_LATE: &str = "nxrs-build shader-xlate did not finish in time";
+pub const XLATE_NOT_STARTED: &str = "nxrs-build shader-xlate did not start: ";
+/// The key nxrs-build printed, the key asked for.
+pub const XLATE_OTHER_KEY: &str = "nxrs-build translated key {} for {}";
+/// `--serve-web`: the nxrs-build the page's run-time shaders are translated with.
+pub const XLATE_WITH: &str = "Run-time shaders are translated with {}";
+/// The server's own line per request: slug, key, what happened, seconds.
+pub const XLATE_LINE: &str = "shader-xlate {} {}: {} in {} s";

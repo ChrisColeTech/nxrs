@@ -81,6 +81,9 @@ extern "C" {
     /// length (kept for `nxgfx_web_fetch_take`), or -1
     fn nxgfx_web_fetch(url: *const u8, url_len: usize) -> i32;
     fn nxgfx_web_fetch_take(dst: *mut u8);
+    /// as `nxgfx_web_fetch`, a POST of `body`: the HTTP status (0: no answer), the answer kept for `..._take`
+    fn nxgfx_web_post(url: *const u8, url_len: usize, body: *const u8, body_len: usize) -> i32;
+    fn nxgfx_web_fetched_len() -> i32;
 }
 
 /// Sleeps until `word` is no longer `val` or `ms` pass.
@@ -231,6 +234,19 @@ pub fn fetch(url: &str) -> Option<Vec<u8>> {
     // SAFETY: the JS side writes the n bytes it reported
     unsafe { nxgfx_web_fetch_take(v.as_mut_ptr()) };
     Some(v)
+}
+
+/// A synchronous POST of `body` to `url` (relative to the page) on this thread: (HTTP status, 0 when the server
+/// did not answer; the answer's body).
+pub fn post(url: &str, body: &[u8]) -> (i32, Vec<u8>) {
+    // SAFETY: the JS side reads url_len bytes of the URL and body_len bytes of the body
+    let status = unsafe { nxgfx_web_post(url.as_ptr(), url.len(), body.as_ptr(), body.len()) };
+    // SAFETY: no arguments; the length of the answer kept by the call above
+    let n = unsafe { nxgfx_web_fetched_len() }.max(0) as usize;
+    let mut v = vec![0u8; n];
+    // SAFETY: the JS side writes the n bytes it reported
+    unsafe { nxgfx_web_fetch_take(v.as_mut_ptr()) };
+    (status, v)
 }
 
 /// Little-endian packet payload builder.

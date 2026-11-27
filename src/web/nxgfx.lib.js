@@ -31,6 +31,30 @@ addToLibrary({
       return -1;
     }
   },
+  // nxgfx_web_post(url, len, body, body_len): a synchronous POST on the calling thread (the live shader translator's
+  // request to the page's server, WEB-W7b); the HTTP status (0: no answer), the answer's body kept for
+  // nxgfx_web_fetched_len / nxgfx_web_fetch_take
+  nxgfx_web_post__deps: ['$nxgfxFetched'],
+  nxgfx_web_post__sig: 'ipppp',
+  nxgfx_web_post: (url, len, body, blen) => {
+    const u = new URL(UTF8ToString(Number(url), Number(len)), scriptDirectory || location.href).href;
+    nxgfxFetched = null;
+    try {
+      const x = new XMLHttpRequest();
+      x.open('POST', u, false);
+      x.responseType = 'arraybuffer';
+      x.setRequestHeader('Content-Type', 'application/octet-stream');
+      // a copy: XHR does not send a view of shared memory
+      x.send(HEAPU8.slice(Number(body), Number(body) + Number(blen)));
+      nxgfxFetched = new Uint8Array(x.response || new ArrayBuffer(0));
+      return x.status;
+    } catch (e) {
+      return 0;
+    }
+  },
+  nxgfx_web_fetched_len__deps: ['$nxgfxFetched'],
+  nxgfx_web_fetched_len__sig: 'i',
+  nxgfx_web_fetched_len: () => (nxgfxFetched ? nxgfxFetched.length : 0),
   nxgfx_web_fetch_take__deps: ['$nxgfxFetched'],
   nxgfx_web_fetch_take__sig: 'vp',
   nxgfx_web_fetch_take: (dst) => {

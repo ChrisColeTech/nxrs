@@ -19,6 +19,8 @@ pub struct Mount {
     pub root: PathBuf,
     pub data: PathBuf,
     pub entry: String,
+    /// the nxrs-build that translates the page's run-time shaders (`web_xlate`); empty: none
+    pub translator: String,
 }
 
 pub type Mounts = Arc<Mutex<HashMap<String, Mount>>>;
@@ -42,6 +44,7 @@ pub fn open_build(dir: &str) -> Result<(WebBuild, Mount), String> {
         root: PathBuf::from(native(dir)),
         data: PathBuf::from(native(&data)),
         entry: b.entry.clone(),
+        translator: String::new(),
     };
     Ok((b, mount))
 }
