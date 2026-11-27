@@ -189,7 +189,8 @@ fn the_engine_translates_into_the_keys_live_folder_only() {
 }
 
 /// Opt-in: `NXRS_XLATE_EXE=<nxrs-build>` and `NXRS_XLATE_INPUT=<recorded request>.bin` (a page's
-/// POST body, named `<key>.bin`): the real engine translates it through the server.
+/// POST body as `dev_server.py --log` keeps it, `xlate-<key>.bin`): the real engine translates it
+/// through the server.
 #[test]
 fn a_recorded_shader_is_translated_by_the_real_engine() {
     let (Ok(exe), Ok(input)) = (
@@ -202,6 +203,7 @@ fn a_recorded_shader_is_translated_by_the_real_engine() {
         .file_stem()
         .unwrap()
         .to_string_lossy()
+        .trim_start_matches("xlate-")
         .to_string();
     let (_t, dir) = tmp();
     let (_s, url, shaders) = serve(&dir, &exe);

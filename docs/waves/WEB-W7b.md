@@ -86,6 +86,26 @@ from the native build's live folder is not kept, so the input is recorded from t
   profile, server restarted) translates nothing. Evidence `D:\Projects\RecompLauncherEngine\build\WEB\W7b\`.
 - Native: the fast engine tests; live.rs's native path unchanged (the same `translate_one` call on the same threads).
 
-## Results
+## Results (2026-11-26)
 
-(filled in at the end)
+Evidence in the main checkout's `build/WEB/W7b/` (Chrome 158 over CDP, port 8775; X = A every 4.1 s, shots at the
+WEB-W7 run7 steps). The web build was made without `--shaders-from` (`build-web.log`: `shaders: 0 found`, 18.6 s) and
+the 16 run-time shaders WEB-W7 had imported were moved out of its `shaders\spv\` first (`imported-spv-backup\`, put
+back afterwards and checked by hash).
+
+| Run | Server | Translated | Result |
+|---|---|---|---|
+| `run1-cold` (new profile) | `nxrs --serve-web` | **16 by the server, 0.12-0.20 s each** (`serve.out`); in the page, each 0.12-0.20 s and 0.1-0.2 s after it was missed (`page.log` at 3.96-4.61 s engine time) | title menu, Grandma Umi (min 1), Tomoyo in the hospital (min 2), Yuuki at the desk (min 3): the same as `build/WEB/W7/run7-validate`; **0 red lines, 0 draws skipped for a shader** (213 replay lines) |
+| `run2-warm` (same profile, server restarted) | `nxrs --serve-web` | **0**: no POST (`net.json`), no server line; 16 `live shader ...: an earlier translation found on the page's server` | the same four scenes; 0 red lines, 0 skipped |
+| `run3-devserver` (new profile, 25 s, `live\` set aside) | `dev_server.py --log` | 16 (0.41-0.73 s each: dev_server.py translates one at a time), 16 requests kept as `xlate-<key>.bin` | the recorded inputs of the launcher's real-engine test |
+
+- **Same output as native:** all 16 `live\<key>\spv\<key>.spv` and `.json` the server wrote are byte-identical to the
+  native build's `live\` records of the same keys (`cmp`).
+- **Real-engine test:** `NXRS_XLATE_EXE=...\nxrs-build.exe NXRS_XLATE_INPUT=build\WEB\W7b\run3-devserver\xlate-0a56e5906042ca31.bin
+  cargo test --test web_xlate`: 200, SPIR-V magic, the answer equal to the library's file, manifest row; 2.55 s (first
+  translation in a fresh folder, `e2e-test.txt`).
+- The disproof did not hold: a child `nxrs-build` per shader takes 0.12-0.20 s, well inside the 3 s draw wait.
+- CDP saw 12 of the 16 POSTs (worker requests are not all reported to it); the server's lines are the count.
+
+Not verified in Chrome: the static-host red line (a server without the route); the route's 404/405/204 answers are
+mapped to it in `live::translate` and the server's 503 is tested.
