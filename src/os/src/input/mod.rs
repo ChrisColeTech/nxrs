@@ -1506,10 +1506,10 @@ static INPUTS: Mutex<Option<Inputs>> = Mutex::new(None);
 
 fn tick(inp: &mut Inputs) {
     let now = motion::now_s();
-    // the web: the page's keyboard and gamepads (no front end there)
-    #[cfg(target_os = "emscripten")]
-    web::poll();
     inp.layout_update();
+    // the web: the page's keyboard and gamepads (no front end there), its pad through the same layout
+    #[cfg(target_os = "emscripten")]
+    web::poll(&inp.map);
     inp.xinput();
     if RESCAN.swap(false, Ordering::AcqRel) || now - inp.last_scan > 2.0 {
         inp.scan(now);

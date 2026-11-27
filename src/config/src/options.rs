@@ -46,6 +46,8 @@ pub const SECTIONS: &[Section] = &[
             o!("mouse_invert", "0", "Mouse direction: 0 = normal, 1 = left / right inverted, 2 = up / down inverted, 3 = both"),
             o!("button_layout", "switch", "Face buttons: switch = by position as on a Switch (right = A, bottom = B, top = X, left = Y;\n;   Circle = A, Cross = B on PlayStation), xbox = by the Xbox labels (bottom = A, right = B, left = X, top = Y;\n;   Cross = A, Square = X on PlayStation). Applies live"),
             o!("button_map", "", "Optional changes on top of button_layout, physical:guest pairs, e.g. south:a east:b.\n;   Physical: south east west north (or cross circle square triangle), l r zl zr lstick rstick plus minus up down\n;   left right. Guest: a b x y l r zl zr lstick rstick plus minus up down left right none"),
+            o!("key_map", "", "Web build: optional changes to the keyboard's default keys, key:guest pairs, e.g. space:b z:none.\n;   Keys: a-z 0-9 num0-num9 space enter backspace tab shift lshift rshift ctrl lctrl rctrl alt lalt ralt\n;   left up right down pageup pagedown home end insert delete minus equal comma period slash semicolon quote\n;   bracketleft bracketright backslash backquote. Guest: button_map's guest names, lsleft lsup lsright lsdown,\n;   rsleft rsup rsright rsdown (the sticks' directions), none. Applies live"),
+            o!("stick_deadzone", "10", "Web build: the gamepad sticks' dead zone in percent, 0 to 30. Applies live"),
             o!("controller_prompt", "1", "1 = when a game wants more players than are connected, it waits with a prompt until they join
 ;   (A or Return: done, B or Esc: cancel); 0 = it gets the players there are at once"),
             o!("pc_user", "1", "The local profile (1..8) the game runs as: picked at launch and by any in-game user picker (a PC app has
@@ -229,6 +231,8 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
         }
         "mouse_invert" => (int(v) & 3).to_string(),
         "recording_fps" => int(v).clamp(15, 60).to_string(),
+        "stick_deadzone" => int(v).clamp(0, 30).to_string(),
+        "key_map" => v.to_ascii_lowercase(),
         "fps_limit" => {
             let n = int(v);
             (if n != 30 && n != 0 && n < 60 {
@@ -299,6 +303,12 @@ mod tests {
             "auto"
         );
         assert_eq!(normalise("recording_fps", "100").unwrap(), "60");
+        assert_eq!(normalise("stick_deadzone", "45").unwrap(), "30");
+        assert_eq!(normalise("stick_deadzone", "-3").unwrap(), "0");
+        assert_eq!(normalise("stick_deadzone", "15").unwrap(), "15");
+        assert_eq!(normalise("key_map", " Space:B Z:none ").unwrap(), "space:b z:none");
+        assert_eq!(find("stick_deadzone").unwrap().default, "10");
+        assert_eq!(find("key_map").unwrap().default, "");
         assert!(normalise("vsync", "1").is_none());
         assert_eq!(canonical("idioma"), "language");
     }

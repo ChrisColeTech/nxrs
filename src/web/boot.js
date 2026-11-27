@@ -36,12 +36,13 @@
     };
   }
 
-  // the one line the player sees: loading, the click for sound, a failure (which stays)
+  // the one line the player sees over the game: the click for sound, a failure (which stays)
   function makeNotice() {
     const el = document.getElementById('notice');
     return {
       show(text, error) {
         if (failed && !error) return;
+        if (error && loading.fail(text)) return;
         el.textContent = text;
         el.className = error ? 'error' : '';
       },
@@ -51,17 +52,77 @@
     };
   }
 
-  // the picture replaces the loading line; a lost GPU device is a failure the player must see
+  // ---- the loading screen (WEB-W9): the game's name and icon, one bar over the bytes still to come (game code and
+  // the boot set), and the steps with their real measures; it leaves at the first picture. A failure replaces the
+  // steps with its reason.
+  const loading = (() => {
+    const el = document.getElementById('nx-loading');
+    const $ = (s) => el.querySelector(s);
+    const steps = {};
+    for (const li of el.querySelectorAll('.steps li')) steps[li.dataset.step] = li;
+    let gone = false;
+    const bytes = { code: 0, codeTotal: 0, data: 0, dataTotal: 0 };
+    const mb = (n) => (n / 1e6).toFixed(1);
+    const bar = () => {
+      const total = bytes.codeTotal + bytes.dataTotal;
+      const got = Math.min(bytes.code, bytes.codeTotal) + Math.min(bytes.data, bytes.dataTotal);
+      $('.big i').style.width = total ? `${(100 * got / total).toFixed(1)}%` : '0';
+      const codeLeft = bytes.code < bytes.codeTotal;
+      $('.cap span').textContent = codeLeft ? 'Downloading game code' : bytes.data < bytes.dataTotal ? 'Downloading game data' : 'Starting';
+      $('.cap .val').textContent = total ? `${mb(got)} of ${mb(total)} MB` : '';
+    };
+    return {
+      step(name, state, measure) {
+        const li = steps[name];
+        if (!li || gone) return;
+        li.className = state;
+        if (measure !== undefined) li.querySelector('.m').textContent = measure;
+      },
+      bytes(kind, got, total) {
+        bytes[kind] = got;
+        bytes[kind + 'Total'] = total;
+        if (!gone) bar();
+      },
+      head(name, sub, icon) {
+        if (name) $('h1').textContent = name;
+        if (sub !== undefined) $('.sub').textContent = sub;
+        if (icon) $('.icon').style.backgroundImage = `url("${icon}")`;
+      },
+      // the first picture: the game is the page
+      leave() {
+        gone = true;
+        el.hidden = true;
+      },
+      // a failure while loading shows here (selectable), in place of the steps; false once the game is shown
+      fail(text) {
+        if (gone) return false;
+        $('.steps').hidden = true;
+        $('.error').textContent = text;
+        return true;
+      },
+    };
+  })();
+
+  // the picture replaces the loading screen; a lost GPU device is a failure the player must see
   addEventListener('nxrs-gpu', (e) => {
-    if (e.detail.first) notice.clear('Loading');
+    if (e.detail.first) {
+      loading.step('start', 'done');
+      loading.leave();
+      NxrsMenu.ready();
+    }
     if (e.detail.fatal) fail(e.detail.fatal);
   });
 
-  // the page's title is the game's name (build.json, beside this page)
-  fetch('build.json', { cache: 'no-store' })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((b) => { if (b && b.title) document.title = b.title; })
-    .catch(() => {});
+  // the game's name from its control data (the first language with one), else build.json's
+  function nacpName(bytes) {
+    for (let i = 0; i < 16; i++) {
+      const b = bytes.subarray(i * 0x300, i * 0x300 + 0x200);
+      const end = b.indexOf(0);
+      const s = new TextDecoder().decode(b.subarray(0, end < 0 ? b.length : end)).trim();
+      if (s) return s;
+    }
+    return '';
+  }
 
   function checks() {
     if (!self.crossOriginIsolated) {
@@ -95,6 +156,8 @@
         if (m.log) log('[web] ' + m.log);
         if (m.ready) resolve(m.ready);
         if (m.stats) stats.shift()?.(m.stats);
+        if (m.saved) savedOk(m.saved);
+        if (m.saveFailed) NxrsMenu.saved({ failed: m.saveFailed.reason });
       };
     });
     worker.postMessage({ init: { files: manifest.files, version: manifest.version, title: manifest.title, bootset, fresh: manifest.fresh } });
@@ -104,6 +167,19 @@
       start: (memory, table) => worker.postMessage({ start: { memory, table } }),
       stats: () => new Promise((r) => { stats.push(r); worker.postMessage({ stats: true }); }),
     };
+  }
+
+  // A save stored by the I/O worker: the menu lists it; the first one asks the browser to keep this site's storage
+  // (navigator.storage.persist), so Chrome does not clear the saves under storage pressure.
+  let persistAsked = false;
+  function savedOk(s) {
+    NxrsMenu.saved({ at: Date.now(), name: s.name });
+    if (persistAsked || !navigator.storage || !navigator.storage.persist) return;
+    persistAsked = true;
+    navigator.storage.persisted()
+      .then((p) => p || navigator.storage.persist())
+      .then((p) => log(`[web] saves: storage ${p ? 'persistent' : 'not persistent (Chrome may clear it when the disk is low)'}`))
+      .catch(() => {});
   }
 
   // the data folder's small files (control data, icon, tables) for the engine's host-file readers; game data excluded
@@ -124,14 +200,34 @@
   }
 
   // ---- audio: the AudioWorklet, started at the first click or key (the browser's autoplay rule)
+  // WEB-W9: a GainNode between the worklet and the speakers (the menu's volume and mute, page-side), and the sound
+  // suspended while the menu pauses the game
   function audioHost() {
     let ring = null;
     let ctx = null;
+    let gain = null;
     let gesture = false;
+    let paused = false;
+    const level = () => (NxrsSettings.get('mute') === '1' ? 0 : Number(NxrsSettings.get('volume')) / 100);
+    NxrsSettings.onChange((k) => {
+      if ((k === 'volume' || k === 'mute') && gain) gain.gain.value = level();
+    });
+    window.NxrsAudio = {
+      suspend() {
+        paused = true;
+        if (ctx) ctx.suspend().catch(() => {});
+      },
+      resume() {
+        paused = false;
+        if (ctx && gesture) ctx.resume().catch(() => {});
+      },
+      // the sound has started (it is only suspended while the menu is open)
+      state: () => ({ running: !!ctx && (ctx.state === 'running' || paused) }),
+    };
     const start = async () => {
       if (!ring || !gesture) return;
       if (ctx) {
-        if (ctx.state !== 'running') ctx.resume().catch(() => {});
+        if (ctx.state !== 'running' && !paused) ctx.resume().catch(() => {});
         return;
       }
       const h = new Int32Array(ring.memory.buffer, ring.at, 16);
@@ -143,14 +239,17 @@
           outputChannelCount: [2],
           processorOptions: { memory: ring.memory, ring: ring.at, frames: ring.frames },
         });
-        node.connect(ctx.destination);
+        gain = ctx.createGain();
+        gain.gain.value = level();
+        node.connect(gain).connect(ctx.destination);
         const state = () => {
           Atomics.store(h, 7, ctx.sampleRate);
           Atomics.store(h, 6, ctx.state === 'running' ? 1 : 2);
           log(`[web] audio: AudioContext ${ctx.state} at ${ctx.sampleRate} Hz`);
         };
         ctx.onstatechange = state;
-        await ctx.resume();
+        if (!paused) await ctx.resume();
+        else await ctx.suspend();
         state();
       } catch (e) {
         log(`[RED] [web] audio: the AudioWorklet did not start: ${e}`);
@@ -201,12 +300,37 @@
     return { response: r, from: kept ? 'changed on the server, fetched' : 'fetched' };
   }
 
-  // Module.instantiateWasm: game.wasm through the code cache, compiled while it streams
+  // Module.instantiateWasm: game.wasm through the code cache, compiled while it streams. The loading screen counts the
+  // body's bytes as they arrive (the stream yields the module's own bytes, so its total is build.json's size).
+  let wasmSize = 0;
+  function counted(response, from) {
+    if (!response.body) return response;
+    let got = 0;
+    const kept = !from.includes('fetched');
+    loading.step('code', 'now', kept ? 'kept copy (checked with the server)' : '');
+    if (kept) loading.bytes('code', 0, 0);
+    const stream = response.body.pipeThrough(new TransformStream({
+      transform(chunk, c) {
+        got += chunk.length;
+        if (!kept) {
+          loading.bytes('code', got, wasmSize);
+          loading.step('code', 'now', `${(got / 1e6).toFixed(1)} of ${(wasmSize / 1e6).toFixed(1)} MB`);
+        }
+        c.enqueue(chunk);
+      },
+    }));
+    return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
+  }
   function instantiateWasm(imports, done) {
     const t0 = performance.now();
     codeResponse('game.wasm')
-      .then(({ response, from }) => WebAssembly.instantiateStreaming(response, imports).then((r) => {
-        log(`[web] game.wasm: ${from}, compiled and instantiated in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
+      .then(({ response, from }) => WebAssembly.instantiateStreaming(counted(response, from), imports).then((r) => {
+        const s = ((performance.now() - t0) / 1000).toFixed(2);
+        log(`[web] game.wasm: ${from}, compiled and instantiated in ${s} s`);
+        if (from.includes('fetched')) loading.bytes('code', wasmSize, wasmSize);
+        loading.step('code', 'done');
+        loading.step('compile', 'done', `${s} s`);
+        loading.step('data', 'now');
         done(r.instance, r.module);
       }))
       .catch((e) => fail('game.wasm: ' + (e.message || e)));
@@ -227,6 +351,19 @@
 
   function timeToMain(io, manifest) {
     const total = manifest.files.reduce((n, f) => n + f[1], 0);
+    // the loading screen: the boot set's bytes present (fetched or cached) every 250 ms until the first picture
+    let started = 0;
+    const progress = setInterval(() => io.stats().then((s) => {
+      if (!s.bootBytes) return;
+      loading.bytes('data', s.bootDoneBytes, s.bootBytes);
+      const left = !s.bootDone;
+      loading.step('data', left ? 'now' : 'done', `${(Math.min(s.bootDoneBytes, s.bootBytes) / 1e6).toFixed(1)} of ${(s.bootBytes / 1e6).toFixed(1)} MB${s.boot ? '' : ' · from this browser\'s cache'}`);
+      if (started) loading.step('start', 'now', `${((performance.now() - started) / 1000).toFixed(0)} s`);
+    }), 250);
+    addEventListener('nxrs-gpu', (e) => { if (e.detail.first) clearInterval(progress); });
+    watchers.push((t) => {
+      if (t.startsWith('[web] saves:') && !started) started = performance.now();
+    });
     // then every 30 s while the engine reads: what came from the network and what from the cache
     let last = '';
     setInterval(() => io.stats().then((s) => {
@@ -246,9 +383,38 @@
     });
   }
 
+  // build.json (beside this page): the game's title id, its name, the module's size
+  async function describe(manifest) {
+    const b = await fetch('build.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : {}), () => ({}));
+    const files = b.files || [];
+    wasmSize = (files.find((f) => f.path === 'game.wasm') || {}).size || 0;
+    const id = b.titleId || '';
+    let name = b.title || manifest.title || 'Game';
+    let icon = '';
+    const nacp = manifest.files.find(([p]) => p === 'control.nacp');
+    const ico = manifest.files.find(([p]) => /^icon_.*\.dat$/.test(p));
+    try {
+      if (nacp) name = nacpName(new Uint8Array(await (await fetch('data/control.nacp')).arrayBuffer())) || name;
+      if (ico) icon = URL.createObjectURL(new Blob([await (await fetch('data/' + encodeURIComponent(ico[0]))).arrayBuffer()], { type: 'image/jpeg' }));
+    } catch { /* the name and icon are a nicety; the start goes on */ }
+    document.title = name;
+    return { id, name, icon };
+  }
+
   async function main() {
     const text = await (await fetch('data.json', { cache: 'no-store' })).text();
     const manifest = JSON.parse(text);
+    const game = await describe(manifest);
+    NxrsSettings.load(game.id);
+    NxrsMenu.init({ title: game.name, titleId: game.id, saveTitle: manifest.title, log });
+    let cached = false;
+    try {
+      cached = !!(await (await caches.open(CODE_CACHE)).match(new URL('game.wasm', location.href).href));
+    } catch { /* no Cache Storage */ }
+    loading.head(game.name, cached ? 'Loading · from this browser\'s cache' : 'Loading · first start on this browser', game.icon);
+    loading.step('checks', 'done', 'WebGPU, threads, 64-bit memory');
+    loading.step('code', 'now');
+    loading.bytes('code', 0, cached ? 0 : wasmSize);
     // ?bootset=0: no prefetch (every read on demand); ?fresh=1: the cache emptied first (a cold start)
     const q = new URLSearchParams(location.search);
     const bootset = q.get('bootset') === '0'
@@ -274,12 +440,19 @@
         const M = window.Module;
         const FS = M.FS || globalThis.FS;
         engineArgs(M);
+        // WEB-W9: the settings kept in this browser, read by the engine as its ini (os/src/boot.rs nxweb_main)
+        FS.mkdirTree('/data');
+        FS.writeFile('/data/settings.ini', NxrsSettings.iniText());
+        (M.ENV || globalThis.ENV).NXRS_TITLE = game.name;
         M.addRunDependency('host');
+        loading.step('saves', 'now');
         Promise.all([
           io.ready,
           hostFiles(FS, manifest, text),
           NxrsSaves.restore(FS, '/data/save', manifest.title, log),
-        ]).then(([cache, [n, bytes]]) => {
+        ]).then(([cache, [n, bytes], saves]) => {
+          loading.step('saves', 'done', saves ? `${saves} restored` : 'none yet');
+          loading.step('start', 'now');
           log(`[web] ${n} host files (${(bytes / 1024).toFixed(0)} KiB) in /data; game data streamed by the I/O worker (${cache} cache); ${secs()} s`);
           M.removeRunDependency('host');
         }, (e) => fail('The game did not start: ' + (e.message || e)));

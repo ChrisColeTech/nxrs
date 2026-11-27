@@ -40,7 +40,7 @@ let pending = []; // journal entries not yet written
 const index = new Map(); // block key -> store offset (OPFS) or Uint8Array (memory)
 const inflight = new Map(); // block key -> Promise
 // boot / demand: bytes fetched (compressed where the file is); zraw: the data those fetches carried, inflated
-const stats = { boot: 0, demand: 0, zraw: 0, hit: 0, reads: 0, fetches: 0, bootFiles: 0, bootBytes: 0, bootDone: false, bootMs: 0, cached: 0 };
+const stats = { boot: 0, demand: 0, zraw: 0, hit: 0, reads: 0, fetches: 0, bootFiles: 0, bootBytes: 0, bootDoneBytes: 0, bootDone: false, bootMs: 0, cached: 0 };
 
 const log = (text) => postMessage({ log: text });
 const key = (f, b) => f * 4294967296 + b;
@@ -315,7 +315,8 @@ let saveChain = Promise.resolve();
 async function saveCommit(name, bytes) {
   const root = await navigator.storage.getDirectory();
   const dir = await (await root.getDirectoryHandle('nxrs-saves', { create: true })).getDirectoryHandle(safe(title), { create: true });
-  const base = safe(name.replace(/\//g, '_'));
+  // the save folder's name escaped, as saves.js restores it (a nested a/b was flattened to a_b and came back there)
+  const base = encodeURIComponent(name);
   const fh = await dir.getFileHandle(base + '.new', { create: true });
   const h = await retryHandle(fh);
   try {
@@ -332,6 +333,8 @@ async function saveCommit(name, bytes) {
     await dir.removeEntry(base + '.bin').catch(() => {});
     await fh.move(base + '.bin');
   }
+  // written by the game now, no longer the imported copy (saves.js's note)
+  await dir.removeEntry(base + '.json').catch(() => {});
 }
 
 // ---------------------------------------------------------------- the slot loop
@@ -356,9 +359,19 @@ function handle(i32, s) {
   } else if (op === 2) {
     const name = new TextDecoder().decode(heap(off, a).slice());
     const bytes = heap(addr, len).slice();
+    const t0 = performance.now();
+    // the page hears of every stored save (its menu lists it) and of a failed one (the menu says so)
     saveChain = saveChain.then(() => saveCommit(name, bytes)).then(
-      () => { log(`io: save ${name} written to the browser's storage (${bytes.length} bytes)`); done(0); },
-      (e) => { log(`[RED] io: save ${name}: ${e.message || e}`); done(-1); });
+      () => {
+        log(`io: save ${name} written to the browser's storage (${bytes.length} bytes)`);
+        done(0);
+        postMessage({ saved: { name, bytes: bytes.length, ms: performance.now() - t0 } });
+      },
+      (e) => {
+        log(`[RED] io: save ${name}: ${e.message || e}`);
+        done(-1);
+        postMessage({ saveFailed: { name, reason: String(e.message || e) } });
+      });
   } else {
     done(-4);
   }
@@ -389,15 +402,17 @@ async function prefetch(bootset) {
     stats.bootFiles++;
     for (const [a, b] of ranges) {
       stats.bootBytes += b - a + 1;
-      jobs.push([f, Math.floor(a / BS), Math.floor(Math.min(b, files[f][1] - 1) / BS)]);
+      jobs.push([f, Math.floor(a / BS), Math.floor(Math.min(b, files[f][1] - 1) / BS), b - a + 1]);
     }
   }
   let next = 0;
   const lane = async () => {
     while (next < jobs.length) {
-      const [f, b0, b1] = jobs[next++];
+      const [f, b0, b1, raw] = jobs[next++];
       try {
         await ensure(f, b0, b1, 'low', 'boot');
+        // the loading screen's measure: the boot set's bytes present, fetched now or already cached
+        stats.bootDoneBytes += raw;
       } catch (e) {
         log(`[RED] io: boot set ${files[f][0]}: ${e.message || e}`);
       }
