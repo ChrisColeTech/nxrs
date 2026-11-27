@@ -932,9 +932,13 @@ fn retarget_globals(m: &mut naga::Module) -> Result<Option<u32>, String> {
             // the set is kept in the name's suffix for reflection (`reflect`)
             g.name = Some(format!("s{}b{}", b.group, b.binding));
             b.group = grp;
-            if stage == ShaderStage::Vertex {
-                if let AddressSpace::Storage { access } = &mut g.space {
+            if let AddressSpace::Storage { access } = &mut g.space {
+                if stage == ShaderStage::Vertex {
                     *access = StorageAccess::LOAD;
+                } else if access.contains(StorageAccess::STORE) {
+                    // a `writeonly` buffer (SPIR-V NonReadable, which glslang 15 emits): WGSL storage buffers are
+                    // `read` or `read_write`, so it is bound read_write
+                    *access |= StorageAccess::LOAD;
                 }
             }
         }
@@ -1107,6 +1111,50 @@ mod tests {
         assert!(v.code.contains("0.0019569471"), "1 / 511: {}", v.code);
         assert!(v.code.contains("1023u"), "UINT masks 10 bits: {}", v.code);
         assert_eq!(v.inputs.iter().find(|i| i.0 == 1).unwrap().1, 'u');
+    }
+
+    /// A `writeonly` storage buffer (SPIR-V NonReadable: glslang 15 emits it for the replay's deswizzle, ASTC and BC7
+    /// kernels) is bound `read_write` in a compute module, as WGSL has no write-only buffers; read-only stays `read`.
+    #[test]
+    fn write_only_storage_buffers_become_read_write() {
+        use naga::{ArraySize, EntryPoint, Function, GlobalVariable, Module, Type, TypeInner};
+        let mut m = Module::default();
+        let ty = |name: Option<&str>, inner| Type { name: name.map(String::from), inner };
+        let u = m.types.insert(ty(None, TypeInner::Scalar(Scalar::U32)), Span::UNDEFINED);
+        let arr = TypeInner::Array { base: u, size: ArraySize::Dynamic, stride: 4 };
+        let arr = m.types.insert(ty(None, arr), Span::UNDEFINED);
+        let members = vec![StructMember { name: Some("v".into()), ty: arr, binding: None, offset: 0 }];
+        let block = m.types.insert(ty(Some("B"), TypeInner::Struct { members, span: 4 }), Span::UNDEFINED);
+        for (binding, access) in [(0, StorageAccess::LOAD), (1, StorageAccess::STORE)] {
+            let g = GlobalVariable {
+                name: None,
+                space: AddressSpace::Storage { access },
+                binding: Some(ResourceBinding { group: 0, binding }),
+                ty: block,
+                init: None,
+                memory_decorations: Default::default(),
+            };
+            m.global_variables.append(g, Span::UNDEFINED);
+        }
+        m.entry_points.push(EntryPoint {
+            name: "main".into(),
+            stage: ShaderStage::Compute,
+            early_depth_test: None,
+            workgroup_size: [1, 1, 1],
+            workgroup_size_overrides: None,
+            function: Function::default(),
+            mesh_info: None,
+            task_payload: None,
+            incoming_ray_payload: None,
+        });
+        let mut v = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+        assert!(v.validate(&m).is_err(), "naga refuses a write-only storage buffer");
+        retarget_globals(&mut m).unwrap();
+        let info = v.validate(&m).unwrap();
+        let code = naga::back::wgsl::write_string(&m, &info, naga::back::wgsl::WriterFlags::empty()).unwrap();
+        assert!(code.contains("var<storage> s0b0") && code.contains("var<storage, read_write> s0b1"), "{code}");
+        let kinds: Vec<_> = reflect(&m).unwrap().into_iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [Kind::Storage { read_only: true }, Kind::Storage { read_only: false }]);
     }
 
     /// Opt-in: `NXRS_WGSL_SPV=<folder of .spv>` (and `NXRS_WGSL_KEYS=<file of keys>` to take only those): every module
