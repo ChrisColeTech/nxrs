@@ -15,6 +15,9 @@ permissions:
 
 env:
   RUST_VERSION: '1.99.0'
+  # the compiler a release builds games with on a machine without Visual Studio (as ci.yml's gnullvm job); its LLVM
+  # (23.1.5) is the one scripts/build/linux-deps.sh bundles for Linux
+  LLVM_MINGW: '20261104'
   # the shader translator's nxnative source, as in ci.yml; checked out with core.autocrlf true it gives the shipped
   # tool's --source-sha, which games' shader caches are keyed by
   NXNATIVE_XLATE: 'e4b0d9b75d39c41c10fdcfec2f0b070df496d7e5'
@@ -27,11 +30,21 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - name: Rust ${{ env.RUST_VERSION }}
+      - name: Rust ${{ env.RUST_VERSION }} + gnullvm target
         shell: pwsh
         run: |
-          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup toolchain install $env:RUST_VERSION --profile minimal --target x86_64-pc-windows-gnullvm
           rustup default $env:RUST_VERSION
+      - name: llvm-mingw ${{ env.LLVM_MINGW }} (ships in the zip as toolchain\llvm-mingw)
+        shell: pwsh
+        run: |
+          $name = "llvm-mingw-$env:LLVM_MINGW-ucrt-x86_64"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW/$name.zip" -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\llvm-mingw-dl
+          New-Item -ItemType Directory -Force build\tools | Out-Null
+          Move-Item "C:\llvm-mingw-dl\$name" build\tools\llvm-mingw
+          & build\tools\llvm-mingw\bin\clang.exe --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Vulkan SDK (spirv-val, glslangValidator)
         shell: pwsh
         run: |
@@ -55,12 +68,25 @@ jobs:
           pwsh src/shaders/tools/build_dmsh_xlate.ps1 -Nxnative C:\nxnative -Out build\tools\dmsh_xlate -Work C:\dmsh_src -Commit $env:NXNATIVE_XLATE
           $sha = (& build\tools\dmsh_xlate\dmsh_xlate.exe --source-sha).Trim()
           if ($sha -ne $env:XLATE_SHA) { throw "dmsh_xlate --source-sha is $sha, expected $env:XLATE_SHA" }
-      - name: Build dist/nxrs
+      - name: Build dist/nxrs (MSVC and gnullvm engines, the bundled llvm-mingw)
         shell: pwsh
-        run: scripts/build/build.ps1 -Jobs 4 -SkipGnu
+        run: scripts/build/build.ps1 -Jobs 4
       - name: Check the release answers its contract
         shell: pwsh
         run: dist\nxrs\nxrs-engine\nxrs-build.exe contract
+      - name: Check the release builds games without Visual Studio (the bundled llvm-mingw and gnu\)
+        # the runner has Visual Studio, so the gnu toolchain is forced; the doctor must find the zip's own compiler and
+        # engine (its Vulkan and keys checks fail on a runner, so only these lines are read)
+        shell: pwsh
+        run: |
+          $env:NXRS_TOOLCHAIN = 'gnu'
+          $out = & dist\nxrs\nxrs-engine\nxrs-build.exe doctor
+          $out
+          $dist = (Resolve-Path dist\nxrs).Path
+          foreach ($what in 'compiler', 'runtime library', 'engine library') {
+            $line = $out | Where-Object { $_ -match "^(ok  |FAIL) $what" }
+            if (-not $line -or $line -notmatch '^ok' -or $line -notlike "*$dist*") { throw "doctor: $what is not the release's own: $line" }
+          }
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\nxrs -DestinationPath nxrs-windows-x64.zip
@@ -79,8 +105,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld cmake pkg-config libvulkan-dev libasound2-dev \
-            libopus-dev libvpx-dev libdav1d-dev libavcodec-dev libavutil-dev zlib1g-dev spirv-tools glslang-tools \
+            zlib1g-dev spirv-tools glslang-tools nasm meson ninja-build zstd xz-utils \
             libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Codecs, static (opus, libvpx, dav1d, FFmpeg's H.264 and AAC; built into the engine)
+        run: |
+          bash scripts/build/linux-deps.sh codecs "$HOME/codecs"
+          echo "NXRS_CODECS=$HOME/codecs" >> "$GITHUB_ENV"
       - name: Rust
         run: |
           rustup toolchain install $RUST_VERSION --profile minimal
@@ -115,7 +145,14 @@ jobs:
           tar -xzf dist/nxrs-engine-linux-x64.tar.gz -C stage/nxrs
           cp target/release/nxrs stage/nxrs/
           stage/nxrs/nxrs-engine/nxrs-build contract
-          tar -czf nxrs-linux-x64.tar.gz -C stage nxrs
+      - name: Bundle the compiler (LLVM's clang + lld and a sysroot) as nxrs/toolchain/clang
+        run: bash scripts/build/linux-deps.sh toolchain stage/nxrs/toolchain/clang
+      - name: Check the release builds games on a clean system (ubuntu:24.04, no compiler, no -dev packages)
+        run: |
+          docker run --rm -v "$PWD/stage/nxrs:/nxrs:ro" -v "$PWD/scripts/build:/s:ro" ubuntu:24.04 \
+            bash -c 'bash /s/linux-deps.sh check /nxrs && { /nxrs/nxrs-engine/nxrs-build doctor || true; }'
+      - name: Package nxrs-linux-x64.tar.gz
+        run: tar -czf nxrs-linux-x64.tar.gz -C stage nxrs
       - uses: actions/upload-artifact@v4
         with:
           name: nxrs-linux-x64
