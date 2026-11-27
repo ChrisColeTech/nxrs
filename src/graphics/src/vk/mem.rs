@@ -264,6 +264,144 @@ pub fn split_windows(win: u64, off: u64, n: u64) -> Vec<(usize, u64, u64)> {
 /// Moves whenever a pool comes, goes or gets its GPU buffer (the raw global memory table is written again).
 pub static POOL_GEN: AtomicU64 = AtomicU64::new(1);
 
+/// Moves whenever a pool comes, goes or gets its GPU buffer (its windows), as `POOL_GEN` does, but not when a sync
+/// defers CPU writes: what `room` answers (a pool's extent and windows, the next pool's base) depends on these only.
+/// Moved under the pools' lock.
+pub static LAYOUT_GEN: AtomicU64 = AtomicU64::new(1);
+
+/// `NXGFX_LANE_CACHES` (default on; `0` the old path): the translation lanes' read-mostly lookups. `room` answers from
+/// a copy of the pools' extents (`EXTENTS`) kept by `LAYOUT_GEN`, the GPU-write notes and the samplers from per-thread
+/// memos, so a lane takes the pools' or the tables' lock only when they changed (MKW-SETS: 28 % of the lanes' busy
+/// samples waited for a lock, ~18 % for the pools' lock in `room`, `note_gpu_write` and `resolve`).
+pub fn lane_caches() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LANE_CACHES").as_deref() != Ok("0"))
+}
+
+/// The generation `room`'s answers are kept by: `LAYOUT_GEN` with the lane caches on, else `POOL_GEN`.
+pub fn room_gen() -> u64 {
+    if lane_caches() {
+        LAYOUT_GEN.load(Ordering::Acquire)
+    } else {
+        POOL_GEN.load(Ordering::Acquire)
+    }
+}
+
+/// A hasher for the lanes' address memos (keys are guest addresses and sizes, never attacker-chosen): one multiply a
+/// word instead of SipHash (MKW-SETS: the memos' SipHash and probing were ~4 % of the lanes' busy samples).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct AddrHasher(u64);
+
+impl std::hash::Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(*b as u64);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(v as u32 as u64);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+}
+
+pub(crate) type AddrHash = std::hash::BuildHasherDefault<AddrHasher>;
+
+/// The pools' extents as of a `LAYOUT_GEN`: (base, size, window size) by base, for `room` without the pools' lock.
+struct Extents {
+    gen: u64,
+    v: Vec<(u64, u64, u64)>,
+}
+
+static EXTENTS: std::sync::RwLock<Option<std::sync::Arc<Extents>>> = std::sync::RwLock::new(None);
+
+/// Every pool as of a `POOL_GEN`, by base: (base, size, buffer, buffer offset of base), the buffer null unless the pool
+/// is plain (one buffer made, no granules, no windows, no deferred CPU writes): what `resolve` answers for a plain
+/// pool's range without the pools' lock, as its per-thread `LAST` entries do.
+struct Plain {
+    gen: u64,
+    v: Vec<(u64, u64, vk::Buffer, u64)>,
+}
+
+static PLAIN: std::sync::RwLock<Option<std::sync::Arc<Plain>>> = std::sync::RwLock::new(None);
+
+/// [a, a + n) in a plain pool of `v` (the pool with the highest base at or below `a`, as `find`): (base, size, the
+/// next pool's base, buffer, buffer offset of base, the pool) for `resolve`'s `LAST`; None when it is in no pool or
+/// the pool is not plain.
+fn plain_find(v: &[(u64, u64, vk::Buffer, u64)], a: u64, n: u64) -> Option<(u64, u64, u64, vk::Buffer, u64, u64)> {
+    let i = v.partition_point(|x| x.0 <= a);
+    let (base, size, buf, off) = *v.get(i.checked_sub(1)?)?;
+    if a + n > base + size || buf == vk::Buffer::null() {
+        return None;
+    }
+    let next = v.get(i).map(|x| x.0).unwrap_or(u64::MAX);
+    Some((base, size, next, buf, off, base))
+}
+
+/// `room` from an extents copy: the bytes to the end of the window holding `a` (0 in no pool) and that window (start,
+/// end, the next pool's base) to remember.
+fn room_from(e: &Extents, a: u64) -> (u64, Option<(u64, u64, u64)>) {
+    // the pool with the highest base at or below `a` (`find`)
+    let i = e.v.partition_point(|x| x.0 <= a);
+    if i == 0 {
+        return (0, None);
+    }
+    let (base, size, win) = e.v[i - 1];
+    if a + 1 > base + size {
+        return (0, None);
+    }
+    let (lo, hi) = if win == 0 {
+        (base, base + size)
+    } else {
+        let k = (a - base) / win;
+        (base + k * win, base + ((k + 1) * win).min(size))
+    };
+    let next = e.v.get(i).map(|x| x.0).unwrap_or(u64::MAX);
+    (hi - a, Some((lo, hi, next)))
+}
+
+#[cfg(test)]
+mod extents_tests {
+    use super::*;
+    /// The copy answers as the pools' map does: the highest base at or below, to the end of the window, nothing past the
+    /// pool's end, the next pool's base kept.
+    #[test]
+    fn room_from_the_extents_copy_is_the_window_end() {
+        let e = Extents { gen: 1, v: vec![(0x1000, 0x1000, 0), (0x4000, 0x3000, 0x1000), (0x5800, 0x100, 0)] };
+        assert_eq!(room_from(&e, 0x800).0, 0, "below every pool");
+        assert_eq!(room_from(&e, 0x1800), (0x800, Some((0x1000, 0x2000, 0x4000))));
+        assert_eq!(room_from(&e, 0x2000).0, 0, "past the first pool's end");
+        assert_eq!(room_from(&e, 0x4100), (0xf00, Some((0x4000, 0x5000, 0x5800))), "first window");
+        // (as the map's `room`: to the window's end; the next pool's base only bounds the remembered window)
+        assert_eq!(room_from(&e, 0x5000), (0x1000, Some((0x5000, 0x6000, 0x5800))), "second window");
+        assert_eq!(room_from(&e, 0x5880), (0x80, Some((0x5800, 0x5900, u64::MAX))));
+    }
+
+    /// A plain pool's range resolves from the copy; a range past its pool, in no pool, or in a pool that is not plain
+    /// (null buffer: granules, windows, deferred writes, no buffer yet) goes to the pools' map.
+    #[test]
+    fn plain_pools_resolve_from_the_copy() {
+        use ash::vk::Handle;
+        let b = vk::Buffer::from_raw(7);
+        let v = vec![(0x1000, 0x1000, b, 0x100), (0x3000, 0x1000, vk::Buffer::null(), 0), (0x3800, 0x100, b, 0)];
+        assert_eq!(plain_find(&v, 0x1800, 0x10), Some((0x1000, 0x1000, 0x3000, b, 0x100, 0x1000)));
+        assert_eq!(plain_find(&v, 0x1ff0, 0x20), None, "past the pool's end");
+        assert_eq!(plain_find(&v, 0x800, 4), None, "in no pool");
+        assert_eq!(plain_find(&v, 0x3100, 4), None, "not plain");
+        assert_eq!(plain_find(&v, 0x3810, 4), Some((0x3800, 0x100, u64::MAX, b, 0, 0x3800)), "a pool laid over");
+    }
+}
+
 /// The pool buffers' usage: with shader device addresses when the device has them (raw global memory).
 fn buf_usage(g: &Gpu) -> vk::BufferUsageFlags {
     if g.d.caps.rt {
@@ -723,6 +861,7 @@ pub fn pool_add(p: &pool_t) {
         }
         let old = m.by_base.insert(base, pool);
         POOL_GEN.fetch_add(1, Ordering::Release);
+        LAYOUT_GEN.fetch_add(1, Ordering::Release);
         old
     };
     if let Some(o) = old {
@@ -791,6 +930,7 @@ pub fn pool_del(base: u64) {
         let mut m = g.mem.lock().unwrap();
         let p = m.by_base.remove(&base);
         POOL_GEN.fetch_add(1, Ordering::Release);
+        LAYOUT_GEN.fetch_add(1, Ordering::Release);
         p
     };
     if let Some(p) = p {
@@ -831,9 +971,42 @@ pub fn room(a: u64) -> u64 {
     thread_local! {
         static LAST: std::cell::Cell<[(u64, u64, u64, u64); 8]> = const { std::cell::Cell::new([(0, 0, 0, 0); 8]) };
     }
-    let gen = POOL_GEN.load(Ordering::Acquire);
+    let gen = room_gen();
     if let Some(e) = LAST.with(|l| l.get().into_iter().find(|e| room_hit(*e, gen, a))) {
         return e.2 - a;
+    }
+    let remember = |w: (u64, u64, u64)| {
+        LAST.with(|l| {
+            let mut v = l.get();
+            v.rotate_right(1);
+            v[0] = (gen, w.0, w.1, w.2);
+            l.set(v);
+        })
+    };
+    if lane_caches() {
+        // the extents copy of this layout, without the pools' lock (made again under it below when it is older)
+        let cur = EXTENTS.read().unwrap().as_ref().filter(|e| e.gen == gen).cloned();
+        if let Some(e) = cur {
+            let (r, w) = room_from(&e, a);
+            if let Some(w) = w {
+                remember(w);
+            }
+            return r;
+        }
+        let m = g.mem.lock().unwrap();
+        // read under the lock, which every layout change holds: the copy is of exactly this generation
+        let now = LAYOUT_GEN.load(Ordering::Acquire);
+        let e = std::sync::Arc::new(Extents {
+            gen: now,
+            v: m.by_base.values().map(|p| (p.base, p.size, p.win)).collect(),
+        });
+        drop(m);
+        let (r, w) = room_from(&e, a);
+        *EXTENTS.write().unwrap() = Some(e);
+        if let Some(w) = w.filter(|_| now == gen) {
+            remember(w);
+        }
+        return r;
     }
     let m = g.mem.lock().unwrap();
     match find(&m, a, 1) {
@@ -1497,6 +1670,7 @@ impl Pool {
             }
         }
         POOL_GEN.fetch_add(1, Ordering::Relaxed);
+        LAYOUT_GEN.fetch_add(1, Ordering::Release);
     }
 
     /// CPU-written ranges since the last call (absolute addresses), page generations bumped. `watched_pages`: this
@@ -2039,7 +2213,42 @@ fn resolve_in(
     if let Some((_, lo, _, _, buf, off, pool)) = hit {
         return Some((buf, off + (a - lo), pool));
     }
+    // the lane caches: a plain pool's range from the copy of this generation, without the pools' lock
+    let plain = lane_caches() && !super::gate::all();
+    if plain {
+        let cur = PLAIN.read().unwrap().as_ref().filter(|s| s.gen == gen).cloned();
+        if let Some(s) = cur {
+            if let Some((lo, size, next, buf, off, pool)) = plain_find(&s.v, a, n1) {
+                LAST.with(|l| {
+                    let mut v = l.get();
+                    v.rotate_right(1);
+                    v[0] = (gen, lo, size, next, buf, off, pool);
+                    l.set(v);
+                });
+                return Some((buf, off + (a - lo), pool));
+            }
+        }
+    }
     let mut m = super::gate::lock(&g.mem, 1);
+    if plain {
+        // the copy made again under the lock when it is older than the pools (every change of them holds the lock)
+        let now = POOL_GEN.load(Ordering::Acquire);
+        if PLAIN.read().unwrap().as_ref().is_none_or(|s| s.gen != now) {
+            let v = m
+                .by_base
+                .values()
+                .map(|p| {
+                    let plain = p.gran.is_none() && p.win == 0 && p.deferred.is_empty();
+                    let (buf, off) = match &p.buf {
+                        Some(b) if plain => (b.buf, p.buf_off),
+                        _ => (vk::Buffer::null(), 0),
+                    };
+                    (p.base, p.size, buf, off)
+                })
+                .collect();
+            *PLAIN.write().unwrap() = Some(std::sync::Arc::new(Plain { gen: now, v }));
+        }
+    }
     let Some(b) = find(&m, a, n1) else {
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 8 {
@@ -3913,6 +4122,57 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     let key = (sub.serial, POOL_GEN.load(Ordering::Acquire), a, n, identity.unwrap_or(u64::MAX));
     if note_memo_on() && note_memo::seen(key) {
         super::perf::inc(super::perf::C::Writebacks);
+        return;
+    }
+    if lane_caches() {
+        // what the pools' map says of [a, a + n), remembered on this thread while `POOL_GEN` stands (a pool's
+        // placement, buffers and windows change only with it): (pool, its identity, the pieces to copy back; none
+        // when the range is in no mirrored pool with a buffer)
+        type Found = Option<(u64, u64, Vec<(vk::Buffer, u64, u64, u64)>)>;
+        thread_local! {
+            static C: std::cell::RefCell<(u64, HashMap<(u64, u64), Found, AddrHash>)> =
+                std::cell::RefCell::new((0, HashMap::default()));
+        }
+        let gen = POOL_GEN.load(Ordering::Acquire);
+        let hit = C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != gen || c.1.len() >= 1 << 12 {
+                c.0 = gen;
+                c.1.clear();
+            }
+            c.1.get(&(a, n)).cloned()
+        });
+        let found = match hit {
+            Some(f) => f,
+            None => {
+                let m = super::gate::lock(&g.mem, 0);
+                // (the generation read under the lock: the answer is of exactly it)
+                let now = POOL_GEN.load(Ordering::Acquire);
+                let f: Found = find(&m, a, n).and_then(|b| {
+                    let p = &m.by_base[&b];
+                    (p.placement == Placement::Mirror && p.buf.is_some()).then(|| (b, p.identity, p.pieces(a, n)))
+                });
+                drop(m);
+                if now == gen {
+                    C.with(|c| {
+                        let mut c = c.borrow_mut();
+                        if c.0 == gen {
+                            c.1.insert((a, n), f.clone());
+                        }
+                    });
+                }
+                f
+            }
+        };
+        let Some((b, pool_identity, pieces)) = found else { return };
+        if !writeback_identity_matches(identity, pool_identity) {
+            return;
+        }
+        super::perf::inc(super::perf::C::Writebacks);
+        for (buf, off, a, n) in pieces {
+            note_writeback(sub, b, a, n, buf, off, pool_identity);
+        }
+        note_memo::put(key);
         return;
     }
     let m = super::gate::lock(&g.mem, 0);

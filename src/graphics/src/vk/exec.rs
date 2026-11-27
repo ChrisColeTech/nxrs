@@ -130,6 +130,9 @@ pub struct QState {
     /// when the key is the same, patched for the next set of that module when only its uniform buffers or push
     /// constants changed
     shadow: std::cell::RefCell<[Vec<Box<Shadow>>; 7]>,
+    /// (segment seeding, `set_seed_on`) the host copies the queue's state held when the stream this segment is of
+    /// began: a module's copy is taken from here when `shadow` has none (`patch_set`)
+    seed: Option<Arc<Seeds>>,
     /// the id of the c2 bank `banks` returned last
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
@@ -268,6 +271,7 @@ struct SetKey {
 /// A stage's last set as written into the descriptor buffer, kept in host memory with the key it was made for: a set
 /// whose key differs from it only in uniform buffers or push constants is this copy with those slots written again
 /// (`patch_set`) instead of the whole set resolved and written (MKW binds new uniform buffers at nearly every draw).
+#[derive(Clone)]
 struct Shadow {
     /// the module the set is of
     module: (usize, crate::nvn::prog::ShaderKey),
@@ -284,6 +288,21 @@ struct Shadow {
     /// the loss ring's record of the set's buffer descriptors (`lost::ring::note_set`)
     ring: [(u32, i32, u64, u64, u64); super::lost::ring::MAXB],
     nr: usize,
+    /// (segment seeding) `image::TEX_DUE` when its texture slots were resolved, and whether one of them is a twin view
+    /// (`image::is_twin_view`: copied per submission, never taken over into another one)
+    due: u64,
+    twin: bool,
+}
+
+/// `NXGFX_SET_SEED` (default on; `0` the old path): a segment of a stream starts with the stage sets' host copies the
+/// queue's state held when the stream began (`QState::seed`), so its first set of a module is patched from that copy
+/// instead of built whole (SET-FAST: ~700 whole sets a frame, 95-97 % "no copy of the module", each segment starting
+/// empty). A copy from another submission is patched with every slot that has a per-submission effect made again
+/// (`CL_SUBMIT`: staged banks, push constants and support bytes, storage buffers and images with their GPU-write notes,
+/// draw records); only its uniform-buffer and sampled-texture slots are kept, as a patch keeps them.
+fn set_seed_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| set_patch_on() && std::env::var("NXGFX_SET_SEED").as_deref() != Ok("0"))
 }
 
 /// Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the
@@ -319,6 +338,8 @@ fn shadow_slot(list: &mut Vec<Box<Shadow>>, module: (usize, crate::nvn::prog::Sh
                 memory_generation: 0,
                 ring: Default::default(),
                 nr: 0,
+                due: 0,
+                twin: false,
             }));
             list.len() - 1
         }
@@ -346,9 +367,22 @@ const CL_SUPPORT: u32 = 1 << 19;
 const CL_MESH: u32 = 1 << 20;
 /// textures and images (their handles are in c2; the views depend on the pools and the registered images)
 const CL_TEX: u32 = 1 << 21;
+/// a slot with a per-submission effect (staged bytes, a GPU-write note, a draw record): made again in every submission
+/// (only a seeded copy from another submission asks for it: `patch_classes`)
+const CL_SUBMIT: u32 = 1 << 22;
 
-/// The classes stage-set resource `r` depends on (0: only on the module and the submission).
+/// The classes stage-set resource `r` depends on, `CL_SUBMIT` for every slot but a uniform buffer bound directly and a
+/// sampled texture (resolved from global state only: the pools, the registered images).
 fn res_class(r: &Res) -> u32 {
+    let sub = match r {
+        Res::Cbuf { bank: 3..=18 } | Res::Tex { .. } | Res::Pool => 0,
+        _ => CL_SUBMIT,
+    };
+    res_class_of(r) | sub
+}
+
+/// `res_class` without `CL_SUBMIT` (0: only on the module and the submission).
+fn res_class_of(r: &Res) -> u32 {
     let slot = |s: i32| match s {
         0 => CL_C0,
         -1 | 2 => CL_C2,
@@ -371,11 +405,21 @@ fn res_class(r: &Res) -> u32 {
 /// The classes whose slots a set keyed `new` needs written again over the module's set keyed `old` (`patch_set`);
 /// None when it is another module's or another submission's set (staging is per submission). Every other slot names
 /// what a whole set would: a slot's class holds everything its descriptor is made from.
+#[cfg(test)]
 fn patch_classes(old: &SetKey, new: &SetKey) -> Option<u32> {
-    if old.module != new.module || old.serial != new.serial {
+    patch_classes_x(old, new, false)
+}
+
+/// `patch_classes`; `cross`: a copy of another submission is patched too (segment seeding), with every `CL_SUBMIT`
+/// slot made again.
+fn patch_classes_x(old: &SetKey, new: &SetKey, cross: bool) -> Option<u32> {
+    if old.module != new.module || (old.serial != new.serial && !cross) {
         return None;
     }
     let mut c = ubos_changed(old, new) as u32;
+    if old.serial != new.serial {
+        c |= CL_SUBMIT;
+    }
     if old.pgen != new.pgen {
         c |= CL_PUSH;
     }
@@ -999,6 +1043,7 @@ impl QState {
             tpart: Default::default(),
             sets: Default::default(),
             shadow: Default::default(),
+            seed: None,
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
@@ -1097,6 +1142,12 @@ impl QState {
         q.ugen = self.ugen;
         // the stream's inline uniform updates before the segment (its handle reads see them, as the GPU will)
         q.ub_upd = self.ub_upd.clone();
+        // the seeds (`set_seed_on`), shared: gathered at parallel runs' joins from the segments' copies, which are
+        // moved there, never copied (a copy of this state's own copies at every fork cost the replay thread more than
+        // the seeds saved)
+        if set_seed_on() {
+            q.seed = self.seed.clone();
+        }
         q
     }
 
@@ -1948,7 +1999,12 @@ fn clamped_draw_record(
     ind: u64,
     rec: u32,
 ) -> Option<(vk::Buffer, u64)> {
-    let (b, o, _) = super::mem::resolve(g, sub, ind, rec as u64)?;
+    // (remembered on the thread with the lane caches: MKW's mesh draws resolved their record under the pools' lock)
+    let (b, o, _) = if super::mem::lane_caches() {
+        resolve_cached(g, sub, ind, rec as u64)?
+    } else {
+        super::mem::resolve(g, sub, ind, rec as u64)?
+    };
     if !clamp_on() {
         return Some((b, o));
     }
@@ -4220,11 +4276,12 @@ fn room_cached(a: u64) -> u64 {
         return super::mem::room(a);
     }
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64>)> =
-            std::cell::RefCell::new((0, 0, std::collections::HashMap::new()));
+        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64, super::mem::AddrHash>)> =
+            std::cell::RefCell::new((0, 0, std::collections::HashMap::default()));
     }
-    // the generations read before the lookup: a change during it makes the entry miss next time
-    let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    // the generations read before the lookup: a change during it makes the entry miss next time (the pools' layout
+    // only, with the lane caches: a sync deferring CPU writes changes no pool's extent)
+    let gen = super::mem::room_gen();
     let vgen = crate::nvn::vpool::generation();
     let hit = C.with(|c| {
         let mut c = c.borrow_mut();
@@ -4302,9 +4359,9 @@ fn resolve_cached(g: &Gpu, sub: &mut Sub, a: u64, n: u64) -> Option<(vk::Buffer,
     if !addr_cache_on() {
         return super::mem::resolve(g, sub, a, n);
     }
-    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64)>;
+    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64), super::mem::AddrHash>;
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::new()));
+        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::default()));
     }
     let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
     let vgen = crate::nvn::vpool::generation();
@@ -4428,6 +4485,8 @@ fn stage_set(
     // Resolution may itself create backing. If this epoch changes, publication
     // declines caching this encoding rather than assigning it the later epoch.
     let memory_generation = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    // read before any texture is resolved: a storage write during it leaves the copy older (`Shadow::due`)
+    let tex_due = super::image::tex_due();
     let t_part = super::perf::fine().then(std::time::Instant::now);
     super::queue::wait_diag::phase("descriptors: banks");
     let st = m.stage as usize;
@@ -4885,7 +4944,7 @@ fn stage_set(
                         },
                     ));
                 } else {
-                    let s = g.tables.samp_at(sid).unwrap_or_else(|| dummy_sampler(g));
+                    let s = g.tables.samp_at_cached(sid).unwrap_or_else(|| dummy_sampler(g));
                     imgs.push((
                         b,
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -4955,6 +5014,11 @@ fn stage_set(
         let mut host = set_patch_on().then(|| shadow_slot(&mut sh[st], mkey));
         if let Some(h) = host.as_deref_mut().filter(|_| only.is_none()) {
             h.memory_generation = memory_generation;
+        }
+        // (segment seeding) what its texture slots were resolved against
+        if let Some(h) = host.as_deref_mut().filter(|_| set_seed_on() && only.is_none_or(|c| c & CL_TEX != 0)) {
+            h.due = tex_due;
+            h.twin = imgs.iter().any(|(_, _, i)| super::image::is_twin_view(i.image_view));
         }
         let (off, evidence) = write_db_set(g, sub, m, &bufs, &imgs, &taddrs, host, only.is_some());
         return (SetRef::Buf(off), evidence, raw_version, memory_generation);
@@ -5041,6 +5105,7 @@ fn patch_set(
     let gen = super::mem::POOL_GEN.load(Acquire);
     let mut sh = qs.shadow.borrow_mut();
     let list = &mut sh[st];
+    let seeded = list.iter().all(|s| s.module != k.module) && seed_into(qs, list, st, k, gen);
     let i = list.iter().position(|s| s.module == k.module)?;
     let h = &mut list[i];
     let old = h.key.as_ref()?;
@@ -5051,7 +5116,20 @@ fn patch_set(
     if old == k {
         return Some((h.off, true));
     }
-    let classes = patch_classes(old, k)?;
+    let mut classes = patch_classes_x(old, k, set_seed_on())?;
+    if old.serial != k.serial {
+        // a copy of another submission (a seed): its texture slots stand only while no texture's storage was written
+        // behind the graphics layer since, and never for a twin view (copied per submission)
+        if h.twin {
+            return None;
+        }
+        if h.due != super::image::tex_due() {
+            classes |= CL_TEX;
+        }
+        if seeded {
+            super::perf::inc(super::perf::C::SetsSeeded);
+        }
+    }
     note_patch(classes);
     // the module's copy to the front, unkeyed while it is patched (`stage_set` writes the front one)
     list[..=i].rotate_right(1);
@@ -5071,6 +5149,62 @@ fn patch_set(
     h.off = off;
     super::perf::inc(super::perf::C::SetsPatched);
     Some((off, false))
+}
+
+/// Segment seeding's copies by stage, one per module, newest first (`QState::seed`): the queue's stage-set copies
+/// gathered over its streams (every segment's, at a parallel run's join), shared by the states forked from it.
+type Seeds = [Vec<Arc<Shadow>>; 7];
+
+/// Most seeds kept per stage (MKW's race frame: a few hundred modules over all its streams).
+const SEEDS: usize = 160;
+
+/// The valid, keyed copies of `lists` as seeds, moved out of them (a segment's state that is dropped).
+fn seeds_of(lists: &mut [Vec<Box<Shadow>>; 7]) -> Seeds {
+    let keep = |s: &Shadow| s.valid && s.key.is_some() && !s.twin;
+    std::array::from_fn(|st| std::mem::take(&mut lists[st]).into_iter().filter(|s| keep(s)).map(Arc::from).collect())
+}
+
+/// `newer` (newest first) over `older`: per stage, a module's newest copy first, at most `SEEDS`.
+fn seeds_merge(newer: Vec<Seeds>, older: Option<&Seeds>) -> Arc<Seeds> {
+    Arc::new(std::array::from_fn(|st| {
+        let mut out: Vec<Arc<Shadow>> = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, crate::nvn::prog::ShaderKey), super::mem::AddrHash> =
+            Default::default();
+        for s in newer.iter().map(|n| &n[st]).chain(older.map(|o| &o[st])).flatten() {
+            if out.len() >= SEEDS {
+                break;
+            }
+            if seen.insert(s.module) {
+                out.push(s.clone());
+            }
+        }
+        out
+    }))
+}
+
+/// Segment seeding: the module's copy from the seeds (`QState::seed`) put into `list` (the stage's copies, at the
+/// front) when it is a valid, keyed whole set of the same pools' generation; whether it was.
+fn seed_into(qs: &QState, list: &mut Vec<Box<Shadow>>, st: usize, k: &SetKey, gen: u64) -> bool {
+    if !set_seed_on() {
+        return false;
+    }
+    let Some(s) = qs.seed.as_ref().and_then(|seed| seed[st].iter().find(|s| s.module == k.module)) else {
+        return false;
+    };
+    if !(s.valid && s.key.is_some() && s.memory_generation == gen && !s.twin) {
+        // (the seed is older than the pools: counted beside the seeded sets)
+        super::perf::inc(super::perf::C::SeedsStale);
+        return false;
+    }
+    let s = Box::new((**s).clone());
+    if list.len() < SHADOWS {
+        list.insert(0, s);
+    } else {
+        // the least recently written copy goes
+        list.pop();
+        list.insert(0, s);
+    }
+    true
 }
 
 /// A stage's descriptors: a set (classic) or its offset in the submission's descriptor buffer.
@@ -5501,7 +5635,7 @@ mod set_patch_tests {
         assert_eq!(decode_record_addr(0x8000_1000, true), (0x8000_1000, false));
         let d = set_deps(&cs).unwrap();
         assert!(d.push && !d.c0, "keyed by the push constants");
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 27, cb_off: 0, written: false }), CL_PUSH);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 27, cb_off: 0, written: false }), CL_PUSH | CL_SUBMIT);
     }
 
     /// NVN2 compute's uniform table in c0 holds hardware handles (size kept at +8); NVN's the address.
@@ -5865,24 +5999,59 @@ mod set_patch_tests {
             change(&mut k);
             assert_eq!(patch_classes(&old, &k), None);
         }
-        // the slots each class makes again
+        // the slots each class makes again (`CL_SUBMIT`: also every slot with a per-submission effect)
         assert_eq!(res_class(&Res::Cbuf { bank: 3 }), 1);
         assert_eq!(res_class(&Res::Cbuf { bank: 18 }), 1 << 15);
-        assert_eq!(res_class(&Res::Cbuf { bank: 27 }), CL_PUSH);
-        assert_eq!(res_class(&Res::Cbuf { bank: 0 }), CL_C0);
-        assert_eq!(res_class(&Res::Cbuf { bank: 2 }), CL_C2);
-        assert_eq!(res_class(&Res::Cbuf { bank: 1 }), 0, "c1 is the module's own");
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), CL_C0);
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: -1, cb_off: 0x20, written: false }), CL_C2);
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false }), 1 << 2);
+        assert_eq!(res_class(&Res::Cbuf { bank: 27 }), CL_PUSH | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 0 }), CL_C0 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 2 }), CL_C2 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 1 }), CL_SUBMIT, "c1 is the module's own, staged");
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), CL_C0 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: -1, cb_off: 0x20, written: false }), CL_C2 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false }), 1 << 2 | CL_SUBMIT);
         assert_eq!(
             res_class(&Res::Sbuf { cb_slot: super::super::gmem::CB_SLOT, cb_off: 0, written: false }),
             u32::MAX
         );
         assert_eq!(res_class(&Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }), CL_TEX);
-        assert_eq!(res_class(&Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 }), CL_TEX);
-        assert_eq!(res_class(&Res::Support), CL_SUPPORT);
-        assert_eq!(res_class(&Res::MeshDraw), CL_MESH);
+        assert_eq!(res_class(&Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 }), CL_TEX | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Support), CL_SUPPORT | CL_SUBMIT);
+        assert_eq!(res_class(&Res::MeshDraw), CL_MESH | CL_SUBMIT);
+    }
+
+    /// Segment seeding: a copy of another submission is patched only when asked (`cross`), with every `CL_SUBMIT`
+    /// slot made again besides what changed; so only uniform buffers bound directly and sampled textures are kept from
+    /// it. Within one submission nothing changes (no patch ever names `CL_SUBMIT`).
+    #[test]
+    fn a_seed_of_another_submission_remakes_its_per_submission_slots() {
+        let old = key();
+        let mut k = key();
+        k.serial += 1;
+        assert_eq!(patch_classes_x(&old, &k, false), None);
+        assert_eq!(patch_classes_x(&old, &k, true), Some(CL_SUBMIT));
+        k.ubo[0] = (0x2000, 0x100);
+        assert_eq!(patch_classes_x(&old, &k, true), Some(1 | CL_SUBMIT));
+        k.image_gen += 1;
+        assert_eq!(patch_classes_x(&old, &k, true), Some(1 | CL_SUBMIT | CL_TEX));
+        let mut same = key();
+        same.ubo[0] = (0x2000, 0x100);
+        assert_eq!(patch_classes_x(&old, &same, true), patch_classes(&old, &same), "same submission: as before");
+        let mut other = key();
+        other.module.0 += 1;
+        assert_eq!(patch_classes_x(&old, &other, true), None, "another module's set");
+        // kept from the seed: a directly bound uniform buffer, a sampled texture; nothing else
+        let kept = |r: &Res| res_class(r) & CL_SUBMIT == 0;
+        assert!(kept(&Res::Cbuf { bank: 3 }) && kept(&Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }));
+        for r in [
+            Res::Cbuf { bank: 1 },
+            Res::Cbuf { bank: 24 },
+            Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false },
+            Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 },
+            Res::Support,
+            Res::MeshDraw,
+        ] {
+            assert!(!kept(&r));
+        }
     }
 }
 
@@ -10068,7 +10237,8 @@ mod par {
         seg_stats::JOIN_WAIT_NS.fetch_add(tw.elapsed().as_nanos() as u64, Relaxed);
         seg_stats::PAR.fetch_add(1, Relaxed);
         let mut later = 0u64;
-        let mut last = None;
+        let mut last: Option<QState> = None;
+        let mut gathered: Vec<Seeds> = Vec::new();
         for k in 0..n {
             let Some(Own((c, wq, draws))) = job.out[k].lock().unwrap().take() else {
                 unreachable!("segment {k} of {n} was not translated");
@@ -10111,10 +10281,23 @@ mod par {
                 }
             }
             queue::child_join(sub, c);
-            last = Some(wq);
+            // (segment seeding) the copies of every segment but the last, gathered for the streams after this one
+            if let Some(prev) = last.replace(wq) {
+                if set_seed_on() {
+                    gathered.push(seeds_of(&mut prev.shadow.borrow_mut()));
+                }
+            }
         }
         queue::child_settle(sub, &job.init);
-        last.expect("a parallel run has segments")
+        let last: QState = last.expect("a parallel run has segments");
+        if set_seed_on() && !gathered.is_empty() {
+            // newest first (the last segment's own copies stay its state's working copies)
+            gathered.reverse();
+            let mut last = last;
+            last.seed = Some(seeds_merge(gathered, last.seed.as_deref()));
+            return last;
+        }
+        last
     }
 }
 

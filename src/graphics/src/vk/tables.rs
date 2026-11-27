@@ -23,6 +23,9 @@ pub struct Tables {
     pending_images: AtomicBool,
 }
 
+/// Moves whenever a sampler slot is written (`write_sampler`): `samp_at_cached`'s memos are of one value of it.
+static SAMP_GEN: AtomicU64 = AtomicU64::new(1);
+
 /// One immutable version. The table caches only the latest; recorded submissions retain older versions through
 /// their fences. Reusing a version across submissions does not mutate descriptors already visible to the GPU.
 struct PoolSnapshot {
@@ -1030,12 +1033,46 @@ impl Tables {
         self.inner.lock().unwrap().samp.get(&id).copied()
     }
 
+    /// `samp_at`, remembered on this thread while no sampler was written (`SAMP_GEN`) with the lane caches on
+    /// (`mem::lane_caches`): every texture slot of every set took the tables' lock for its sampler.
+    pub fn samp_at_cached(&self, id: i32) -> Option<vk::Sampler> {
+        if !super::mem::lane_caches() {
+            return self.samp_at(id);
+        }
+        type Map = HashMap<i32, Option<vk::Sampler>, super::mem::AddrHash>;
+        thread_local! {
+            static C: std::cell::RefCell<(usize, u64, Map)> = std::cell::RefCell::new((0, 0, Map::default()));
+        }
+        let me = self as *const Tables as usize;
+        // read before the lookup: a write during it leaves the entry under an older generation (a miss next time)
+        let gen = SAMP_GEN.load(Ordering::Acquire);
+        let hit = C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != me || c.1 != gen || c.2.len() >= 1 << 14 {
+                *c = (me, gen, Map::default());
+            }
+            c.2.get(&id).copied()
+        });
+        if let Some(s) = hit {
+            return s;
+        }
+        let s = self.samp_at(id);
+        C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 == me && c.1 == gen {
+                c.2.insert(id, s);
+            }
+        });
+        s
+    }
+
     pub fn write_sampler(&self, d: &Device, id: i32, s: vk::Sampler) {
         let mut i = self.inner.lock().unwrap();
         if i.samp.get(&id) == Some(&s) {
             return;
         }
         i.samp.insert(id, s);
+        SAMP_GEN.fetch_add(1, Ordering::AcqRel);
         if self.db.is_some() {
             let Some(g) = super::Gpu::try_get() else {
                 return;

@@ -933,6 +933,17 @@ pub struct Images {
     /// storage start -> serials (CPU-written textures)
     by_addr: BTreeMap<u64, Vec<u64>>,
     max_size: u64,
+    /// moves whenever `by_addr` (or an image's storage behind it) changes; `spans` is of `spans_gen`
+    addr_gen: u64,
+    spans_gen: u64,
+    /// (`img_spans_on`) every image of `by_addr` as (storage start, end, serial), by start: the CPU-write check of a
+    /// submission with many dirty ranges walks it beside the sorted ranges instead of looking every image up
+    spans: Vec<(u64, u64, u64)>,
+    /// (`img_due_on`) images that may be due for initialization or upload: made, CPU-written, or found due and not
+    /// prepared yet; and the images of sparse virtual pools (checked through their pages at every submission). A
+    /// submission's walk looks at these instead of every image (stale serials are skipped)
+    due: Vec<u64>,
+    sparse_list: Vec<u64>,
     /// the virtual pool mapping generation the sparse textures were last checked at
     sparse_seen: u64,
     /// released images by what they were (storage, description, layout): a game that initializes its transient
@@ -1240,6 +1251,88 @@ fn twin_levels(im: &Image) -> u32 {
 
 /// Twins by (texture serial, kind).
 static CUBE_TWINS: Mutex<Option<HashMap<(u64, TwinKind), CubeTwin>>> = Mutex::new(None);
+
+/// Every twin view made (raw handles; a handle Vulkan reuses after a twin went only makes a set unseedable), and their
+/// count: a stage set holding one is never taken into another submission (exec's segment seeding), since a twin is
+/// copied from its image by each submission that samples it.
+static TWIN_VIEWS: std::sync::RwLock<std::collections::BTreeSet<u64>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+static TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether `v` is a twin view (`cube_twin_view`).
+pub fn is_twin_view(v: vk::ImageView) -> bool {
+    TWINS.load(std::sync::atomic::Ordering::Acquire) != 0
+        && TWIN_VIEWS.read().unwrap().contains(&vk::Handle::as_raw(v))
+}
+
+/// Moves whenever the CPU writes a texture's storage behind the graphics layer (`storage_written`: WriteTexels, a
+/// host decoder): its image uploads at the next use's preparation. A stage set's texture slots resolved before a move
+/// are resolved again before the set is used in another submission (exec's segment seeding).
+static TEX_DUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn tex_due() -> u64 {
+    TEX_DUE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Whether a presented texture's image is a picture the GPU drew and nothing else is due for it: no CPU-written
+/// content to take (not sparse, no upload or initialization pending). Its present needs no pool sync of its own
+/// (`queue::present_lean`).
+pub fn presented_gpu_drawn(im: &Image) -> bool {
+    im.gpu_owned && im.sparse.is_none() && !im.needs_init && !im.needs_upload
+}
+
+/// `NXGFX_IMG_DUE` (default on; `0` the old walk over every image): a submission looks for the images due for
+/// initialization or upload among the candidates `Images::due` keeps (made or CPU-written since, found due before and
+/// not prepared yet), the images the CPU writes overlap now and the sparse ones, instead of walking every image
+/// (MKW: ~2 % of the replay thread at ~10 walks a frame).
+fn img_due_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_IMG_DUE").as_deref() != Ok("0"))
+}
+
+/// `NXGFX_IMG_SPANS` (default on; `0` the old walk): a submission's CPU-write check over many dirty ranges walks the
+/// images' kept spans (`Images::spans`) beside the ranges instead of looking every image up.
+fn img_spans_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_IMG_SPANS").as_deref() != Ok("0"))
+}
+
+/// The serials of `spans` (by start) that `dirty` (sorted, not overlapping) overlaps: for each span the first range
+/// ending past its start, as the old walk's binary search found it, here a pointer that only moves forward.
+fn spans_hit(spans: &[(u64, u64, u64)], dirty: &[(u64, u64)]) -> Vec<u64> {
+    let mut hit = Vec::new();
+    let mut j = 0;
+    for &(lo, hi, s) in spans {
+        while j < dirty.len() && dirty[j].0 + dirty[j].1 <= lo {
+            j += 1;
+        }
+        if j == dirty.len() {
+            break;
+        }
+        if dirty[j].0 < hi {
+            hit.push(s);
+        }
+    }
+    hit
+}
+
+#[cfg(test)]
+mod spans_tests {
+    /// The forward walk finds what a binary search per image finds.
+    #[test]
+    fn spans_hit_the_images_the_ranges_overlap() {
+        let spans = [(0x1000, 0x2000, 1), (0x1000, 0x1100, 2), (0x3000, 0x4000, 3), (0x5000, 0x9000, 4), (0xa000, 0xb000, 5)];
+        let dirty = [(0x1800, 0x10), (0x4000, 0x800), (0x8ff0, 0x20)];
+        assert_eq!(super::spans_hit(&spans, &dirty), vec![1, 4], "ends are exclusive; an image after the last range");
+        let old = |lo: u64, hi: u64| {
+            let i0 = dirty.partition_point(|&(a, n)| a + n <= lo);
+            i0 < dirty.len() && dirty[i0].0 < hi
+        };
+        let want: Vec<u64> = spans.iter().filter(|s| old(s.0, s.1)).map(|s| s.2).collect();
+        assert_eq!(super::spans_hit(&spans, &dirty), want);
+        assert!(super::spans_hit(&spans, &[]).is_empty());
+    }
+}
 
 /// Whether an image is a single-sample, one-layer 2D colour image (any aspect): the shape a 3D twin copies.
 pub fn volume_twin_fits(
@@ -1839,6 +1932,7 @@ impl Gpu {
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
+            imgs.addr_gen += 1;
             if forward_on() {
                 imgs.forward.insert(old, t.serial);
             }
@@ -1886,7 +1980,14 @@ impl Gpu {
         }
         imgs.forward.remove(&t.serial);
         imgs.released.remove(&t.serial);
+        if im.needs_init || im.needs_upload {
+            imgs.due.push(t.serial);
+        }
+        if !t.mem.is_null() && crate::nvn::vpool::is_sparse(t.mem as u64) {
+            imgs.sparse_list.push(t.serial);
+        }
         imgs.by_serial.insert(t.serial, im);
+        imgs.addr_gen += 1;
         self.tables.invalidate_images();
         true
     }
@@ -2112,6 +2213,8 @@ impl Gpu {
                 return None;
             }
         };
+        TWIN_VIEWS.write().unwrap().insert(vk::Handle::as_raw(view));
+        TWINS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         t.views.insert(key, view);
         Some(view)
     }
@@ -2758,6 +2861,7 @@ impl Gpu {
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
         }
+        imgs.addr_gen += 1;
         // an image shared with other texture objects: an alias only drops its views; an owner hands the image and its
         // memory to the first of its aliases
         let aliases: Vec<u64> = imgs
@@ -3911,6 +4015,8 @@ impl Gpu {
                 &web_dirty
             }
         };
+        // the images the CPU writes overlap (candidates of the due walk below, `img_due_on`)
+        let mut hit: Vec<u64> = Vec::new();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             // the pool sync hands each pool's ranges in pool order, not address order: in order and merged here, the
             // lookups below take the sorted paths (unsorted, every texture hit filtered every range: OoT's syncs spent
@@ -3923,14 +4029,30 @@ impl Gpu {
                 &merged
             };
             let max = imgs.max_size;
-            let mut hit = Vec::new();
             let dirty_sorted = dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);
             let per_range: usize = if dirty_sorted {
                 dirty.len().min(imgs.by_addr.len())
             } else {
                 usize::MAX
             };
-            if dirty_sorted && per_range >= 64 {
+            if dirty_sorted && per_range >= 64 && img_spans_on() {
+                // (MKW-SETS) the textures' spans, kept while `by_addr` stands, walked beside the sorted ranges: no image
+                // looked up (the walk below was ~2 ms of the replay thread a frame in MKW's race, ~10 submissions)
+                if imgs.spans_gen != imgs.addr_gen || imgs.spans.is_empty() && !imgs.by_addr.is_empty() {
+                    let mut v: Vec<(u64, u64, u64)> = Vec::with_capacity(imgs.by_serial.len());
+                    for ss in imgs.by_addr.values() {
+                        for &sv in ss {
+                            if let Some(im) = imgs.by_serial.get(&sv) {
+                                let lo = im.tex.mem as u64;
+                                v.push((lo, lo + im.tex.l.size, sv));
+                            }
+                        }
+                    }
+                    imgs.spans = v;
+                    imgs.spans_gen = imgs.addr_gen;
+                }
+                hit = spans_hit(&imgs.spans, dirty);
+            } else if dirty_sorted && per_range >= 64 {
                 // many dirty ranges (a game's loading: Mario Kart World's first submission had ~30,000 textures and
                 // pages without end; a lookup per range over the largest texture's span took 17 s): one pass over the
                 // textures, each looking its storage up in the sorted ranges
@@ -3955,7 +4077,7 @@ impl Gpu {
             // once each (a texture under many dirty pages was hashed once per page: Violet's 40 ms of prep a frame)
             hit.sort_unstable();
             hit.dedup();
-            for s in hit {
+            for &s in &hit {
                 if let Some(im) = imgs.by_serial.get_mut(&s) {
                     let lo = im.tex.mem as u64;
                     let hi = lo + im.tex.l.size;
@@ -4066,6 +4188,33 @@ impl Gpu {
         // and the images due (init or upload): one walk over every image with the sparse check (two walks of ~6,700
         // images at each of OoT's ~11 submissions a frame were most of this function's time, OOT-DESC)
         let mut serials: Vec<u64> = Vec::new();
+        if img_due_on() {
+            // (MKW-SETS) only the images that can be due: made or CPU-written since (`Images::due`), the ones the CPU
+            // writes overlap now, and the sparse ones; those found due stay candidates until prepared
+            let mut cand = std::mem::take(&mut imgs.due);
+            cand.extend_from_slice(&hit);
+            cand.extend_from_slice(&imgs.sparse_list);
+            cand.sort_unstable();
+            cand.dedup();
+            let images = &mut *imgs;
+            for s in cand {
+                let Some(im) = images.by_serial.get_mut(&s) else { continue };
+                if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
+                    let hit = dirty
+                        .iter()
+                        .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
+                    if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
+                        im.needs_upload = true;
+                    }
+                }
+                if im.needs_init || im.needs_upload {
+                    serials.push(s);
+                }
+            }
+            let live = &images.by_serial;
+            images.sparse_list.retain(|s| live.contains_key(s));
+            images.due = serials.clone();
+        } else {
         for (s, im) in imgs.by_serial.iter_mut() {
             if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
                 let hit = dirty
@@ -4078,6 +4227,7 @@ impl Gpu {
             if im.needs_init || im.needs_upload {
                 serials.push(*s);
             }
+        }
         }
         // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
         // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
@@ -4452,6 +4602,8 @@ impl Gpu {
     /// The CPU wrote [lo, lo + n) behind the graphics layer's back (WriteTexels, a host decoder): every image over
     /// it uploads from its storage at the next submission, also one the GPU wrote before.
     pub fn storage_written(&self, lo: u64, n: u64) {
+        // a stage set's texture slots resolved before this are not taken into another submission (`tex_due`)
+        TEX_DUE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut imgs = self.images.lock().unwrap();
         let max = imgs.max_size;
         let hit: Vec<u64> = imgs
@@ -4459,12 +4611,14 @@ impl Gpu {
             .range(lo.saturating_sub(max)..lo + n)
             .flat_map(|(_, ss)| ss.iter().copied())
             .collect();
+        let images = &mut *imgs;
         for s in hit {
-            if let Some(im) = imgs.by_serial.get_mut(&s) {
+            if let Some(im) = images.by_serial.get_mut(&s) {
                 let (a, b) = (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size);
                 if a < lo + n && lo < b && im.sparse.is_none() {
                     im.gpu_owned = false;
                     im.needs_upload = true;
+                    images.due.push(s);
                 }
             }
         }
