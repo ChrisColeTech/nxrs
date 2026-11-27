@@ -670,6 +670,11 @@ const NxrsMenu = (() => {
     if (document.fullscreenElement && navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock(['Escape']).catch(() => {});
   });
 
+  // the button table's gamepad names follow the face-button layout
+  NxrsSettings.onChange((k) => {
+    if (k === 'button_layout' && open && section === 'controller') show('controller', 'Face buttons');
+  });
+
   return {
     init(c) {
       ctx = c;

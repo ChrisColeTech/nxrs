@@ -46,6 +46,10 @@ pub fn run() {
     let mut stall = Stall::default();
     loop {
         let p = crate::nvn::presents();
+        // a game paused by the host (the web page's menu) shows no new image on purpose
+        if crate::clock::held() {
+            stall = Stall::default();
+        }
         if let Some(sec) = stall.tick(p, Instant::now()) {
             crate::log!("warning: {sec} s without a new image (frames={p}, GPU submits={}); the guest threads:", crate::nvn::submits());
             for l in nxrt::kernel::dump_threads().lines() {

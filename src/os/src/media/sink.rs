@@ -906,6 +906,14 @@ fn web_device_thread() {
     loop {
         std::thread::sleep(Duration::from_millis(2));
         let now = Instant::now();
+        // the page's menu pauses the game (WEB-W9): its AudioContext is suspended, the ring is left as it is and
+        // nothing is consumed, so the sound goes on where it stopped
+        if crate::clock::held() {
+            beat = (ring.heartbeat(), now);
+            clock0 = (now, 0);
+            last = now;
+            continue;
+        }
         longest = longest.max(now.duration_since(last));
         last = now;
         let hb = ring.heartbeat();
