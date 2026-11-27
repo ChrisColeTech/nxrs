@@ -4658,6 +4658,18 @@ fn stage_set(
                         {
                             // SAFETY: guest memory inside a registered pool (identity mapped)
                             let f = unsafe { core::slice::from_raw_parts(a as *const f32, nf) };
+                            // NXGFX_DUMP_RAW=1: the whole bank as the guest memory holds it, once per address
+                            if std::env::var("NXGFX_DUMP_RAW").as_deref() == Ok("1")
+                                && super::mem::room(a) >= n
+                            {
+                                let p = passdump::dir().join(format!("cbuf-{a:x}-{n:x}.bin"));
+                                if !p.exists() {
+                                    // SAFETY: as above, `room` covers the bank's `n` bytes
+                                    let b = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
+                                    let _ = std::fs::create_dir_all(passdump::dir());
+                                    let _ = std::fs::write(p, b);
+                                }
+                            }
                             said.push(format!(
                                 "c{k}@{a:#x}+{n:#x}={:?}",
                                 f.iter()

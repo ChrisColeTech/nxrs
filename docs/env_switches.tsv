@@ -40,7 +40,7 @@ NXGFX_DUMP_AT_S	diagnostic	Pass dumps (diagnostics): `NXGFX_DUMP_AT_S=<s>[,<s>..
 NXGFX_DUMP_DIR	path	(`NXGFX_DUMP_DIR`, default `captures`), with one log line per pass (its draws, targets, formats).	src/graphics/src/vk/capture.rs, src/graphics/src/vk/exec.rs
 NXGFX_DUMP_PASSES	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_PNG	diagnostic	NXGFX_DUMP_PNG=0: the log lines only (dumps every few seconds over a long run)	src/graphics/src/vk/exec.rs
-NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
+NXGFX_DUMP_RAW	diagnostic	NXGFX_DUMP_RAW=1: a pass dump also writes each target's raw texels (`.bin` beside the PNG) and each constant bank a dumped stage binds as the guest memory holds it (`cbuf-<addr>-<size>.bin`, once per address)	src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
 NXGFX_DYN_DEDUPE	switch	SET-FAST: a draw sets only the dynamic states (and graphics stage-set descriptor-buffer offsets) that differ from what its command buffer holds; mesh / ordinary pipeline changes forget topology and primitive restart, patch control points are always set. `NXGFX_DYN_DEDUPE=0`: every state and offset at every draw, as before	src/graphics/src/vk/exec.rs
 NXGFX_FAULT_FLASH	diagnostic	`NXGFX_FAULT_FLASH=<white>,<black>`: with NXGFX_FAULT_SHOTS, the fractions of the picture newly fully white / near black in one frame that trigger a capture (default `0.02,0.25`; 0 turns one off)	src/graphics/src/vk/shot/fault.rs
