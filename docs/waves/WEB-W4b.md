@@ -185,3 +185,41 @@ Same branch (`web-w4b`, from `b608ee8`), title, port 8772, GPU 1. Evidence in th
 
 Expected files: `src/graphics/src/vk/mem.rs` (audit, fix, tests), possibly `src/graphics/src/vk/image.rs` (the
 texture check's web arm).
+
+### Findings (2026-11-26)
+
+Runs in the main checkout's `build/WEB/W4d/` (Chrome over CDP, `?fresh=1`, A every 6 s from 40 s, as `agsob`).
+
+- **The sheen did not reproduce on the default sync.** Four runs on the branch head before any fix (`run2-on`,
+  `run3-on`, `run4-on` (overwritten by `run5-on`), `run5-on`) reach the same beach shot as W4c's `run12-on/beach1.png`
+  (pier, 5 kills, 80-110 s), and the water is clean in every one (`run3-on/sheet.png`, `run5-on/sheet.png`). The
+  audit run (`run1-audit`) is clean too.
+- **The audit names no miss the GPU reads.** It counts 9-10 MB a sync of pages written before a sync and compared by
+  no use in it (`web sync audit` lines), with no texture over any of the top ranges: CPU-written pool memory the frame
+  does not bind (ring space for later frames, the game's own data). It cannot reach 0 for that reason, and nothing
+  ties any of it to the water. So the by-use sync is not shown to miss a write here.
+- **What does differ in W4c's sheen run:** six `a uniform binding of 1536 ... 6656 bytes where the shader declares
+  65536: a zero stand-in` red lines (`run12-on-page.log`, 53 s). WebGPU binds a uniform buffer only at the size its
+  shader declares (a 64 KiB constant bank); the web device widens a short binding inside its buffer, but a constant
+  buffer in a pool's last 64 KiB had no room, and the whole bank was bound as zeros. It depends on where the game's
+  uniform ring stands, so it comes and goes between runs, in both sync modes (`run13-off` has 7 such lines; my clean
+  runs 0 or 1). `red_once` hid any later ones, so whether the water's bank was among them cannot be read back.
+
+### Fix
+
+`mem::ensure_buffer`: on the web a pool's GPU buffer is the pool plus `WEB_POOL_TAIL` (64 KiB) of zeros
+(`pool_buffer_len`, only where it fits the device's largest buffer). Every constant buffer in the pool now binds whole;
+the bytes past the pool read 0, as Vulkan's robust access does natively. Native is unchanged (tail 0). The audit stays
+behind `NXGFX_WEB_SYNC_AUDIT=1`.
+
+### Results
+
+| Item | State | Evidence |
+|---|---|---|
+| Audit | Built (`e197ce8`) | `run1-audit/page.log`: `web sync audit` lines every 300 syncs, with the textures over the top ranges |
+| Pool tail | Built (`e197ce8`) | tests `web_pool_tail_tests` (2), `web_sync_audit_tests` (1); `cargo test --release -p graphics` 278 passed |
+| Default sync after the fix (`run6-fix-on`, 80-145 s) | Clean water, **58.6-60.0 FPS**, compare by use 6.7 MB in 0.79-1.06 ms a frame, per-pool pass 0.06-0.07 ms | `run6-fix-on/sheet.png`, `t90.png`; 0 `uniform binding of` lines in the run |
+
+**Unproven:** that the zero-bound bank was the sheen's cause. The sheen was seen once (W4c `run12-on`) and not again in
+five runs here, before or after the fix. The same-frame comparison with `NXGFX_WEB_USE_SYNC=0` was not made: at 7-10 FPS
+the slow run reaches the beach in another state.
