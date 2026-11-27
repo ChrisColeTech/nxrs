@@ -130,7 +130,9 @@ The lead merges a wave only when every line holds:
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
 - [ ] The lead merges each wave as soon as it reports and these lines hold, never batching finished waves; the
-      worktree is removed (junction first) right after its merge. A next wave branches from the merged
+      worktree is removed (junction first) right after its merge, after its `build\play\` run folders are moved
+      into the main checkout's `build\play\` (`build/` is not in git: removing the worktree deletes the runs, as
+      happened to every wave run of 2026-11-27 before this line). A next wave branches from the merged
       `gameplay-harness`, not from an unmerged wave branch.
 - [ ] Push only when the owner asks, and to the feature branch (`git push origin gameplay-harness`), where CI builds
       and tests. `main` changes only by merging a green feature branch (a pull request) when the owner says so; a push
