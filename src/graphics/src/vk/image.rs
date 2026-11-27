@@ -1128,6 +1128,11 @@ fn how_inc(i: usize) {
     HOW[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+fn alias_overlap_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_ALIAS_OVERLAP").as_deref() != Ok("0"))
+}
+
 const PARK_FRAMES: u64 = 8;
 const PARK_MAX: usize = 512;
 
@@ -2248,12 +2253,7 @@ impl Gpu {
         let samples = samples_of(t.d.samples);
         let bpb = layout::fmt_bpb(t.d.format).0;
         let depthy = |k: Kind| matches!(k, Kind::Depth | Kind::DepthStencil | Kind::Stencil);
-        let (os, o) = imgs
-            .by_addr
-            .get(&(t.mem as u64))?
-            .iter()
-            .rev()
-            .find_map(|s| {
+        let fits = |s: &u64| {
                 let o = imgs.by_serial.get(s)?;
                 let (_, oext, _) = shape(&o.tex);
                 let same_shape = o.ty == ty
@@ -2273,7 +2273,36 @@ impl Gpu {
                 let storage_ok = t.d.flags as u32 & tex_flags::IMAGE == 0
                     || o.usage.contains(vk::ImageUsageFlags::STORAGE);
                 (same_shape && same_fmt && storage_ok && !o.needs_init).then_some((*s, o))
-            })?;
+        };
+        let lo = t.mem as u64;
+        let at_start = imgs.by_addr.get(&lo).and_then(|v| v.iter().rev().find_map(fits));
+        // (OOT-MEM) else a live image the GPU drew, of exactly this format and shape, over part of this storage: Ocarina
+        // of Time keeps render-target objects of a transient heap whose placements overlap one another (never
+        // finalized; on the console they share that memory), and each new placement was a new 7.5-15 MB image for
+        // good (~900 of them, 4.9 GB, by the end of the walk; the run reached 31.8 of its 32 GB). Sharing the image is
+        // what the console's shared memory does: what one draws, the other reads. `NXGFX_ALIAS_OVERLAP=0`: only at
+        // the same start, as before.
+        let (os, o) = match at_start {
+            Some(x) => x,
+            None if alias_overlap_on() => {
+                let hi = lo + t.l.size.max(1);
+                imgs.by_addr
+                    .range(lo.saturating_sub(imgs.max_size)..hi)
+                    .rev()
+                    .flat_map(|(_, v)| v.iter().rev())
+                    .filter(|s| {
+                        imgs.by_serial.get(s).is_some_and(|o| {
+                            let olo = o.tex.mem as u64;
+                            o.gpu_owned
+                                && o.format == tf.vk
+                                && olo < hi
+                                && lo < olo + o.tex.l.size.max(1)
+                        })
+                    })
+                    .find_map(fits)?
+            }
+            None => return None,
+        };
         let owner = o.alias_of.unwrap_or(os);
         static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
