@@ -127,6 +127,7 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
 | Run-time shader (the web server) | `shader-xlate <webDir>\<name>_data\shaders`, the request on stdin, the key on stdout (Web builds, below) |
+| Pad output (the web server) | `pad-bridge`, the page's pad lines on stdin, its log on stdout and stderr (Web builds, below; added 2026-11-27, WEB-PADBRIDGE) |
 
 Other subcommands (not run by the launcher): `dlc install | remove | list`, `profile`, `doctor`, `translate`.
 
@@ -210,6 +211,33 @@ translation per key at a time. Nothing outside the mount's `shaders\live\<key>\`
 nxrs-build is run. The page also looks in `data/shaders/live/<key>/spv/` before asking (an earlier page's
 translation); the next build promotes those records into the library's `spv\`. A static host has no route: the page
 says so in a red line and skips the draws, as before. `src/web/dev_server.py` has the same route.
+
+**Pad rumble and lights through the launcher** (WEB-PADBRIDGE, contract 2, added 2026-11-27). Chrome cannot rumble
+every pad (the DualSense has no `vibrationActuator` on Windows; WebHID needs a permission) and a page cannot set a
+pad's lights, so a page the launcher serves sends its pads' output to the launcher, which drives the pads natively:
+
+- The page opens a WebSocket (RFC 6455; text frames) to `/<slug>/pad-bridge` on its own origin and sends one line
+  per change and at least every 250 ms: `pad <active> <low 1> <high 1> <low 2> <high 2> <low 3> <high 3> <low 4>
+  <high 4>`. `active` is 1 while the game owns input (the page focused and visible, its menu closed: what a native
+  run takes from its window's focus), else 0; the levels are the engine's input block words `[56..64)` (0..65535,
+  already 0 when not active, the rumble settings applied). Zero at once on menu open, blur, hidden and `pagehide`.
+- The launcher's server answers the upgrade `101` (`Sec-WebSocket-Accept`), `400` without a key, `404` for no such
+  build, `503` when the mount has no nxrs-build (an imported web game) or it does not start. It runs `nxrs-build
+  pad-bridge` (fixed arguments, working directory nxrs-build's folder, stdout and stderr into `<webDir>\pad-bridge.log`,
+  written anew each connection), writes each well-formed line to its stdin (others are dropped), answers ping with
+  pong, and ends on a close frame, a broken socket or 5 s without a frame: stdin is closed and the bridge has 2 s to
+  end before it is killed.
+- `nxrs-build pad-bridge` (Windows; elsewhere it says so and exits 1) runs the engine's input layer as a native run's
+  input thread does (`src/os/src/input/bridge.rs`): its scan, player slots (the first pad is player 1), player lights
+  while `active` (DualSense player LED and lightbar, DualShock 4 lightbar, Nintendo player LEDs), and each player's
+  two levels through the native output (DualSense / DualShock 4 output reports, XInput, Nintendo standard rumble).
+  It never takes a pad from the browser: devices are opened shared, Sony pads on Bluetooth (whose output would switch
+  them to reports the browser cannot read) and Switch 2 pads (a BLE connection) are left alone, HD rumble is off (the
+  page carries the two standard levels). No line for 1 s: motors 0 and lights off until the next line. End of stdin:
+  motors 0, lights off, devices closed, exit 0. Each output report it writes is in its log with its bytes; a failed
+  write is logged with the Windows error.
+- Without the route (a static host, `dev_server.py`, a launcher or nxrs-build without the verb) the socket does not
+  open or closes, and the page plays rumble itself as before (`vibrationActuator`, WebHID for the DualSense).
 
 ```
 <webDir>\index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js   the page and its workers

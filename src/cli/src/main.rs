@@ -468,6 +468,9 @@ enum Cmd {
     /// Translate one shader a web build's page asked for (stdin: u32 LE ctl length, ctl, code) into
     /// <shaders>\live\<key>\ as a native run's live translator does; prints the key.
     ShaderXlate { shaders: PathBuf },
+    /// Drive the pads' rumble and lights for a web page (stdin: `pad <active> <low> <high> x4` lines from the
+    /// launcher's server) with the engine's native input layer; quiet and exit at the end of stdin.
+    PadBridge,
     /// (development) Translate to C and stage the data folder: what nxrt-dev's end-to-end tests run.
     Translate {
         input: PathBuf,
@@ -519,6 +522,7 @@ const SUBCOMMANDS: &[&str] = &[
     "doctor",
     "contract",
     "shader-xlate",
+    "pad-bridge",
     "translate",
     "help",
 ];
@@ -646,6 +650,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             }
             Err(e) => fail(&e),
         },
+        Cmd::PadBridge => pad_bridge(),
         Cmd::Translate {
             input,
             out,
@@ -691,6 +696,18 @@ fn translate(
         datadir.display()
     ));
     Ok(())
+}
+
+/// `pad-bridge` (WEB-PADBRIDGE): the engine's input layer drives the pads for a web page (os `input::bridge`).
+#[cfg(windows)]
+fn pad_bridge() -> i32 {
+    nxos::input::bridge::run()
+}
+
+#[cfg(not(windows))]
+fn pad_bridge() -> i32 {
+    eprintln!("pad-bridge: not built on this platform (Windows only); the page keeps its own rumble");
+    1
 }
 
 fn doctor() -> i32 {

@@ -40,3 +40,12 @@ pub const XLATE_OTHER_KEY: &str = "nxrs-build translated key {} for {}";
 pub const XLATE_WITH: &str = "Run-time shaders are translated with {}";
 /// The server's own line per request: slug, key, what happened, seconds.
 pub const XLATE_LINE: &str = "shader-xlate {} {}: {} in {} s";
+
+/// The pad bridge's answers and the server's own lines (slug, what happened).
+pub const NO_PAD_BRIDGE: &str = "this server has no nxrs-build to drive the pads with";
+pub const BAD_PAD_REQUEST: &str = "not a WebSocket request (Sec-WebSocket-Key)";
+pub const PAD_LINE: &str = "pad-bridge {}: {}";
+pub const PAD_STARTED: &str = "bridge started, log {}";
+pub const PAD_NOT_STARTED: &str = "bridge did not start: {}";
+pub const PAD_ENDED: &str = "page gone, bridge ended ({} lines forwarded)";
+pub const PAD_KILLED: &str = "page gone, bridge stopped after {} ms ({} lines forwarded)";

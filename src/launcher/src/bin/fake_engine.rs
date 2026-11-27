@@ -1,8 +1,8 @@
 //! Answers like nxrs-build (launcher contract v2) for the process and command-line tests, as the Qt
 //! test binary's `main()` did: `contract`, `doctor` (one failing check), `update-info` (every package
 //! but "other game" is update 1.1.1), `dlc sync` (every package but "refused" gets a manifest line),
-//! `build` (progress lines, then the build's files) and `shader-xlate`. `FAKE_LINES`, `FAKE_SLEEP_MS`, `FAKE_FAIL`
-//! and `FAKE_CHILD` shape a build for the streaming and cancel tests.
+//! `build` (progress lines, then the build's files), `shader-xlate`, `pad-bridge`. `FAKE_LINES`,
+//! `FAKE_SLEEP_MS`, `FAKE_FAIL` and `FAKE_CHILD` shape a build for the streaming and cancel tests.
 
 use std::io::Write;
 use std::path::Path;
@@ -171,6 +171,9 @@ fn shader_xlate(args: &[String]) -> i32 {
     if made { 0 } else { 1 }
 }
 
+#[path = "fake_engine/running.rs"]
+mod running;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -183,10 +186,8 @@ fn main() {
         Some("dlc") if args.get(1).is_some_and(|a| a == "sync") => dlc_sync(&args),
         Some("build") => build(&args),
         Some("shader-xlate") => shader_xlate(&args),
-        Some("sleep") => {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            0
-        }
+        Some("pad-bridge") => running::pad_bridge(),
+        Some("sleep") => running::sleep(),
         _ => 2,
     };
     let _ = std::io::stdout().flush();
