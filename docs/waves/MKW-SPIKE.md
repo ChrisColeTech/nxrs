@@ -223,9 +223,12 @@ red lines with the crashed pipeline's skipped draws; gate give-ups at loads, 4 i
 
 ## 7. What is left
 
-- **The GPU hang (§5)**: unexplained. Next: run `mkw` with `NXGFX_CHECKPOINTS=all` until it recurs (the checkpoint
-  ring names the command if the driver reports the device lost), and alternate the two switches off on the repeat
-  runs if it does; until then the lead may prefer to merge with both switches and watch for exit 72 / 71.
+- **The GPU hang (§5)**: unexplained. Checkpoints do not help as things stand: status 72 is a deliberate no-logging
+  self-termination 5 s into a completion wait (`submission_safety::resource_safety_fatal`), so a recurrence leaves no
+  checkpoint dump unless another thread meets `VK_ERROR_DEVICE_LOST` first (in `sp-v2-prof` none did). Localizing it
+  needs either the last checkpoints written before status 72 (a change to that exit's no-logging contract, the owner's
+  and the harness's) or repeat runs with one switch off at a time once it recurs. Until then, watch the merged build's
+  MKW runs for exit 72 / 71.
 - **Heavy-draw stretches** (2,200-2,500 draws): the frame there is op 14-16 ms + ~3.2 ms; 60 needs ~1.5-2 ms off
   every such frame. Left on the path: the pool sync (3.0-3.5 ms: lock wait 0.55-0.7, GetWriteWatch scan ≈0.5 of it
   under the locks, the per-pool pass ~1.1), the lanes' view lookups (`by_serial` / view-map probing, ~1 % of the replay
