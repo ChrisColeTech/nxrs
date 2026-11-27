@@ -359,7 +359,8 @@ unsafe extern "system" fn get_features2(_p: vk::PhysicalDevice, out: *mut vk::Ph
             v.dynamic_rendering = 1;
             v.synchronization2 = 1;
             v.maintenance4 = 1;
-            v.shader_demote_to_helper_invocation = 1;
+            // naga reads no SPV_EXT_demote_to_helper_invocation: the replay discards with OpKill instead
+            v.shader_demote_to_helper_invocation = 0;
             v.shader_zero_initialize_workgroup_memory = 1;
         }
         vk::StructureType::PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT => {

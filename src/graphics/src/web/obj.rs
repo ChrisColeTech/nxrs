@@ -214,13 +214,8 @@ pub fn objs() -> std::sync::MutexGuard<'static, Objs> {
 pub fn gpu_buffer(size: u64, usage: vk::BufferUsageFlags) -> u32 {
     use vk::BufferUsageFlags as B;
     // WebGPU: MAP_READ 1, MAP_WRITE 2, COPY_SRC 4, COPY_DST 8, INDEX 16, VERTEX 32, UNIFORM 64, STORAGE 128, INDIRECT 256
-    let mut u = 4 | 8;
-    if usage.contains(B::INDEX_BUFFER) {
-        u |= 16;
-    }
-    if usage.contains(B::VERTEX_BUFFER) {
-        u |= 32;
-    }
+    // index and vertex use always: the replay binds index data it converted into buffers made for other uses
+    let mut u = 4 | 8 | 16 | 32;
     if usage.intersects(B::UNIFORM_BUFFER | B::UNIFORM_TEXEL_BUFFER) {
         u |= 64;
     }

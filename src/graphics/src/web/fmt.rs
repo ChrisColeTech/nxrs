@@ -67,9 +67,26 @@ const fn ds(name: &'static str, bytes: u32, depth: bool, stencil: bool) -> Tex {
     }
 }
 
-/// The WebGPU texture format of a Vulkan format, None when WebGPU has none (the device reports no features for it).
+/// The WebGPU texture format of a Vulkan format on this device (its optional features applied), None when WebGPU has
+/// none (the device reports no features for it).
 pub fn tex(f: vk::Format) -> Option<Tex> {
+    let feats = super::ring::hdr(super::ring::H_FEATURES).load(std::sync::atomic::Ordering::Relaxed);
+    let t = tex_base(f)?;
+    if t.name == "rg11b10ufloat" && feats & super::ring::F_RG11B10_RENDER == 0 {
+        return Some(Tex { render: false, blend: false, ..t });
+    }
+    if t.name.contains("16unorm") && !t.depth && feats & super::ring::F_TIER1 == 0 {
+        return None;
+    }
+    Some(t)
+}
+
+fn tex_base(f: vk::Format) -> Option<Tex> {
     Some(match f {
+        // texture-formats-tier1's 16-bit normalized formats sample unfiltered
+        F::R16_UNORM => Tex { blend: true, ..c("r16unorm", 2, "unfilterable-float", true, false) },
+        F::R16G16_UNORM => Tex { blend: true, ..c("rg16unorm", 4, "unfilterable-float", true, false) },
+        F::R16G16B16A16_UNORM => Tex { blend: true, ..c("rgba16unorm", 8, "unfilterable-float", true, false) },
         F::R8_UNORM => c("r8unorm", 1, "float", true, false),
         F::R8_SNORM => c("r8snorm", 1, "float", false, false),
         F::R8_UINT => c("r8uint", 1, "uint", true, false),

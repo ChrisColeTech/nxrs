@@ -48,6 +48,10 @@ pub const F_FLOAT32_FILTER: u32 = 2;
 pub const F_D32S8: u32 = 4;
 pub const F_DUAL_SRC: u32 = 8;
 pub const F_SWIZZLE: u32 = 16;
+/// rg11b10ufloat is a render target
+pub const F_RG11B10_RENDER: u32 = 32;
+/// texture-formats-tier1: the 16-bit normalized formats (r16unorm, ...)
+pub const F_TIER1: u32 = 64;
 
 #[repr(C, align(256))]
 pub struct Ring {

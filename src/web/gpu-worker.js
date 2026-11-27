@@ -9,7 +9,7 @@ const H_MAGIC = 0, H_HEAD = 1, H_TAIL = 2, H_STATE = 3, H_CANVAS_W = 4, H_CANVAS
   H_PRESENTS = 7, H_GEN = 8, H_DATA_SIZE = 9, H_FEATURES = 10, H_MAX_STORAGE_PER_STAGE = 11,
   H_MAX_UNIFORM_PER_STAGE = 12, H_MAX_TEXTURES_PER_STAGE = 13, H_MAX_BIND_GROUPS = 14, H_MAX_STORAGE_MB = 15,
   H_MAX_TEX_2D = 16, H_DONE = 17, H_EXEC_US = 18, H_FRAME_US = 19, H_SLEEPING = 20;
-const F_BC = 1, F_FLOAT32_FILTER = 2, F_D32S8 = 4, F_DUAL_SRC = 8, F_SWIZZLE = 16;
+const F_BC = 1, F_FLOAT32_FILTER = 2, F_D32S8 = 4, F_DUAL_SRC = 8, F_SWIZZLE = 16, F_RG11B10_RENDER = 32, F_TIER1 = 64;
 const OP = {
   BUFFER: 1, DESTROY: 2, TEXTURE: 3, VIEW: 4, SAMPLER: 5, SHADER: 6, BGL: 7, PLAYOUT: 8, RPIPE: 9, CPIPE: 10,
   BINDGROUP: 11, SUBMIT_BEGIN: 20, UPLOAD: 21, UPLOAD_TEX: 22, PASS_BEGIN: 23, PASS_END: 24, SET_PIPELINE: 25,
@@ -46,6 +46,7 @@ onmessage = async (e) => {
   const m = e.data;
   memory = m.memory;
   ringAddr = m.ring;
+  shotEvery = m.shotEvery | 0;
   H = new Int32Array(memory.buffer, ringAddr, 64);
   DATA = H[H_DATA_SIZE];
   dataBase = ringAddr + 256;
@@ -56,7 +57,8 @@ onmessage = async (e) => {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('requestAdapter gave no adapter');
     const want = ['texture-compression-bc', 'float32-filterable', 'depth32float-stencil8', 'depth-clip-control',
-      'dual-source-blending', 'indirect-first-instance', 'texture-component-swizzle'];
+      'dual-source-blending', 'indirect-first-instance', 'texture-component-swizzle', 'rg11b10ufloat-renderable',
+      'texture-formats-tier1'];
     const features = want.filter((f) => adapter.features.has(f));
     const L = adapter.limits;
     const lim = {};
@@ -90,6 +92,8 @@ onmessage = async (e) => {
     if (device.features.has('depth32float-stencil8')) f |= F_D32S8;
     if (device.features.has('dual-source-blending')) f |= F_DUAL_SRC;
     if (device.features.has('texture-component-swizzle')) f |= F_SWIZZLE;
+    if (device.features.has('rg11b10ufloat-renderable')) f |= F_RG11B10_RENDER;
+    if (device.features.has('texture-formats-tier1')) f |= F_TIER1;
     H[H_FEATURES] = f;
     H[H_MAX_STORAGE_PER_STAGE] = device.limits.maxStorageBuffersPerShaderStage;
     H[H_MAX_UNIFORM_PER_STAGE] = device.limits.maxUniformBuffersPerShaderStage;
@@ -384,7 +388,7 @@ function submit(p0, len) {
           const size = bpr * rpi * (d - 1) + bpr * (rows - 1) + Math.ceil(w / fi.bw) * fi.bytes;
           flush();
           device.queue.writeTexture({ texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] },
-            bytes(src, size), { offset: 0, bytesPerRow: bpr, rowsPerImage: rpi }, { width: w, height: h, depthOrArrayLayers: d });
+            bytes(src, size), { offset: 0, bytesPerRow: bpr, rowsPerImage: rpi }, blockExtent(fi, w, h, d));
           break;
         }
         case OP.PASS_BEGIN: {
@@ -517,7 +521,7 @@ function submit(p0, len) {
             }
           }
           enc.copyBufferToTexture({ buffer: src, offset: so, bytesPerRow: sbpr, rowsPerImage: src === buf ? rpi : rows },
-            { texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] }, { width: w, height: h, depthOrArrayLayers: d });
+            { texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] }, blockExtent(fi, w, h, d));
           used = true;
           break;
         }
@@ -530,7 +534,7 @@ function submit(p0, len) {
           const fi = blockOf(info.get(tex).format);
           const rows = Math.ceil(h / fi.bh);
           const src = { texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] };
-          const ext = { width: w, height: h, depthOrArrayLayers: d };
+          const ext = blockExtent(fi, w, h, d);
           if (bpr % 256 === 0 && off % 4 === 0) {
             enc.copyTextureToBuffer(src, { buffer: buf, offset: off, bytesPerRow: bpr, rowsPerImage: rpi }, ext);
           } else {
@@ -558,7 +562,7 @@ function submit(p0, len) {
           enc.copyTextureToTexture(
             { texture: s, mipLevel: u32(a + 4), origin: { x: u32(a + 8), y: u32(a + 12), z: u32(a + 16) }, aspect: ASPECT[u32(a + 52)] },
             { texture: d, mipLevel: u32(a + 24), origin: { x: u32(a + 28), y: u32(a + 32), z: u32(a + 36) }, aspect: ASPECT[u32(a + 52)] },
-            { width: u32(a + 40), height: u32(a + 44), depthOrArrayLayers: u32(a + 48) });
+            blockExtent(blockOf(info.get(u32(a)).format), u32(a + 40), u32(a + 44), u32(a + 48)));
           used = true;
           break;
         }
@@ -654,7 +658,7 @@ function blockOf(f) {
   if (f.startsWith('bc')) return { bw: 4, bh: 4, bytes: /^bc[14]-/.test(f) ? 8 : 16 };
   const b = {
     r8unorm: 1, r8snorm: 1, r8uint: 1, r8sint: 1, stencil8: 1, r16uint: 2, r16sint: 2, r16float: 2, rg8unorm: 2, rg8snorm: 2,
-    rg8uint: 2, rg8sint: 2, depth16unorm: 2, r32uint: 4, r32sint: 4, r32float: 4, rg16uint: 4, rg16sint: 4, rg16float: 4,
+    rg8uint: 2, rg8sint: 2, depth16unorm: 2, r16unorm: 2, rg16unorm: 4, rgba16unorm: 8, r32uint: 4, r32sint: 4, r32float: 4, rg16uint: 4, rg16sint: 4, rg16float: 4,
     rgba8unorm: 4, 'rgba8unorm-srgb': 4, rgba8snorm: 4, rgba8uint: 4, rgba8sint: 4, bgra8unorm: 4, 'bgra8unorm-srgb': 4,
     rgb10a2unorm: 4, rgb10a2uint: 4, rg11b10ufloat: 4, rgb9e5ufloat: 4, depth32float: 4, depth24plus: 4,
     'depth32float-stencil8': 4, rg32uint: 8, rg32sint: 8, rg32float: 8, rgba16uint: 8, rgba16sint: 8, rgba16float: 8,
@@ -663,6 +667,8 @@ function blockOf(f) {
   return { bw: 1, bh: 1, bytes: b };
 }
 const isInt = (f) => /[us]int$/.test(f);
+// a copy of a block-compressed mip smaller than a block covers the whole block (WebGPU copies whole blocks)
+const blockExtent = (fi, w, h, d) => ({ width: Math.ceil(w / fi.bw) * fi.bw, height: Math.ceil(h / fi.bh) * fi.bh, depthOrArrayLayers: d });
 const UNFILTERABLE = new Set(['r32float', 'rg32float', 'rgba32float', 'depth32float', 'depth16unorm', 'depth24plus', 'depth32float-stencil8']);
 
 // ---------- blit, clears, present ----------
@@ -863,7 +869,47 @@ function present(texId) {
   device.queue.submit([enc.finish()]);
   const now = performance.now();
   if (lastPresent) H[H_FRAME_US] = Math.round((now - lastPresent) * 1000);
+  frameTimes.push(now - lastPresent);
   lastPresent = now;
-  Atomics.add(H, H_PRESENTS, 1);
+  const n = Atomics.add(H, H_PRESENTS, 1) + 1;
+  if (shotEvery && n % shotEvery === 0) shot(t, ti, n);
+  if (frameTimes.length >= 300) {
+    const v = frameTimes.splice(0).sort((x, y) => x - y);
+    const avg = v.reduce((s, x) => s + x, 0) / v.length;
+    say(`frames: ${(1000 / avg).toFixed(1)} FPS over the last ${v.length} presents (median ${v[v.length >> 1].toFixed(1)} ms, p95 ${v[Math.floor(v.length * 0.95)].toFixed(1)} ms); ring exec ${(H[H_EXEC_US] / 1000).toFixed(2)} ms last submission; ${H[H_ERRORS]} WebGPU errors`);
+  }
   return true;
+}
+
+// development: every `shotEvery` presents the presented image goes to the dev server (POST /shot, dev_server.py --log)
+const frameTimes = [];
+let shotEvery = 0;
+let shotBusy = false;
+async function shot(t, ti, n) {
+  if (shotBusy) return;
+  shotBusy = true;
+  try {
+    const bpr = Math.ceil(ti.w * 4 / 256) * 256;
+    const buf = device.createBuffer({ size: bpr * ti.h, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow: bpr }, { width: ti.w, height: ti.h });
+    device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const src = new Uint8Array(buf.getMappedRange());
+    const px = new Uint8ClampedArray(ti.w * ti.h * 4);
+    for (let y = 0; y < ti.h; y++) {
+      for (let x = 0; x < ti.w; x++) {
+        const s = y * bpr + x * 4, d = (y * ti.w + x) * 4;
+        px[d] = src[s + 2]; px[d + 1] = src[s + 1]; px[d + 2] = src[s]; px[d + 3] = 255;
+      }
+    }
+    buf.destroy();
+    const oc = new OffscreenCanvas(ti.w, ti.h);
+    oc.getContext('2d').putImageData(new ImageData(px, ti.w, ti.h), 0, 0);
+    const blob = await oc.convertToBlob({ type: 'image/png' });
+    await fetch(new URL('shot?n=' + n, self.location.href).href.replace(/gpu-worker\.js.*shot/, 'shot'), { method: 'POST', body: blob });
+  } catch (e) {
+    once('shot', 'shot: ' + e);
+  }
+  shotBusy = false;
 }

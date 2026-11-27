@@ -962,6 +962,16 @@ impl Library {
         {
             return true;
         }
+        // the web: the library is on the page's server, fetched on first use (and kept: `load` finds it in memory)
+        #[cfg(target_os = "emscripten")]
+        {
+            if let Some(v) = self.load(key) {
+                self.mem.lock().unwrap().insert(*key, v);
+                return true;
+            }
+            return false;
+        }
+        #[allow(unreachable_code)]
         let Some(dir) = self.dir.lock().unwrap().clone() else {
             return false;
         };

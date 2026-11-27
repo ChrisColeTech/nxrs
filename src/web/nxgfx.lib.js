@@ -17,7 +17,8 @@ addToLibrary({
   nxgfx_web_fetch__deps: ['$nxgfxFetched'],
   nxgfx_web_fetch__sig: 'ipp',
   nxgfx_web_fetch: (url, len) => {
-    const u = UTF8ToString(Number(url), Number(len));
+    // relative to the page's folder (a pthread's own location may be a blob: URL)
+    const u = new URL(UTF8ToString(Number(url), Number(len)), scriptDirectory || location.href).href;
     try {
       const x = new XMLHttpRequest();
       x.open('GET', u, false);

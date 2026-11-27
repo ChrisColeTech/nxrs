@@ -63,6 +63,10 @@ def make_handler(build: Path, data: Path, log_file=None):
             if self.path == '/log' and log_file is not None:
                 with open(log_file, 'ab') as fh:
                     fh.write(body)
+            # /shot?n=N: a presented image from the GPU worker (?shots=N on the page), saved beside --log
+            m = re.match(r'/shot\?n=(\d+)$', self.path)
+            if m and log_file is not None:
+                (Path(log_file).parent / f'shot-{int(m.group(1)):06d}.png').write_bytes(body)
             self.send_response(204)
             self.headers_common('text/plain', 0)
             self.end_headers()

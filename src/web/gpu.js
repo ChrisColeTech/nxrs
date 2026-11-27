@@ -55,7 +55,9 @@
         if (m.stats) NXRS_GPU.stats = m.stats;
       };
       worker.onerror = (e) => say('worker: ' + e.message, true);
-      worker.postMessage({ memory, ring, canvas: off, width: W, height: H }, [off]);
+      // ?shots=N: every N-th presented image goes to the dev server (development)
+      const shotEvery = Number(new URLSearchParams(location.search).get('shots') || 0);
+      worker.postMessage({ memory, ring, canvas: off, width: W, height: H, shotEvery }, [off]);
       NXRS_GPU.worker = worker;
     },
   };

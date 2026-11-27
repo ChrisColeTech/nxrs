@@ -136,6 +136,8 @@ struct Pass {
     depth: Option<vk::Format>,
     samples: u32,
     extent: (u32, u32),
+    /// no attachment at all: WebGPU has no such pass; nothing is emitted and its draws are refused
+    empty: bool,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -243,7 +245,7 @@ impl<'a> Rs<'a> {
                     self.begin_pass(colors, depth.as_ref().or(stencil.as_ref()), depth.is_some(), stencil.is_some());
                 }
                 Cmd::EndRendering => {
-                    if self.pass.take().is_some() {
+                    if self.pass.take().is_some_and(|p| !p.empty) {
                         self.put(op::PASS_END, |_| {});
                     }
                     self.bound = Bound::default();
@@ -415,7 +417,7 @@ impl<'a> Rs<'a> {
                     }
                 }
                 Cmd::ClearAttachments { atts, rects } => {
-                    if self.pass.is_none() {
+                    if self.pass.as_ref().is_none_or(|p| p.empty) {
                         continue;
                     }
                     for a in atts {
@@ -469,7 +471,7 @@ impl<'a> Rs<'a> {
     }
 
     fn begin_pass(&mut self, colors: &[Attachment], ds: Option<&Attachment>, has_depth: bool, has_stencil: bool) {
-        let mut pass = Pass { colors: Vec::new(), depth: None, samples: 1, extent: (0, 0) };
+        let mut pass = Pass { colors: Vec::new(), depth: None, samples: 1, extent: (0, 0), empty: false };
         let view_info = |h: u64| -> Option<(u32, vk::Format, u32, (u32, u32), bool)> {
             let v = self.o.view.get(&h)?;
             let im = self.o.img.get(&v.image)?;
@@ -500,6 +502,12 @@ impl<'a> Rs<'a> {
             if pass.extent == (0, 0) {
                 pass.extent = *ext;
             }
+        }
+        if dsv.is_none() && pass.colors.iter().all(|c| c.is_none()) {
+            pass.empty = true;
+            self.pass = Some(pass);
+            self.bound = Bound::default();
+            return;
         }
         self.put(op::PASS_BEGIN, |p| {
             p.u32(cols.len() as u32);
@@ -605,10 +613,23 @@ impl<'a> Rs<'a> {
                     entries.push(serde_json::json!({ "binding": b.binding, "buffer": id, "offset": off, "size": size }));
                 }
                 Kind::Texture { sample, dim, multi } => {
-                    let view = match desc {
+                    let mut view = match desc {
                         Desc::Img { view, .. } => self.o.view.get(&view),
                         _ => None,
                     };
+                    // a view WebGPU cannot bind where the shader's texture type is (a colour stand-in where a
+                    // shadow lookup reads depth, an integer texture where floats are read): a zero stand-in
+                    if let Some(t) = view.and_then(|v| fmt::tex(v.format)) {
+                        let fits = match *sample {
+                            "depth" => t.depth,
+                            "float" => matches!(t.sample, "float" | "unfilterable-float" | "depth"),
+                            s => t.sample == s,
+                        };
+                        if !fits {
+                            red_once(&format!("a {} texture bound where the shader reads {sample}: a stand-in", t.name));
+                            view = None;
+                        }
+                    }
                     let st = match view.and_then(|v| fmt::tex(v.format)) {
                         Some(t) if *sample == "float" && !t.filter => "unfilterable-float",
                         Some(t) if *sample == "float" && t.depth && !t.stencil => "unfilterable-float",
@@ -818,6 +839,10 @@ impl<'a> Rs<'a> {
             red_once("a draw outside a render pass");
             return false;
         };
+        if pass.empty {
+            red_once("a draw in a pass with no attachment (WebGPU has no such pass): refused");
+            return false;
+        }
         let Some(Pipeline::Gfx(g)) = self.gfx.as_deref() else {
             red_once("a draw without a graphics pipeline");
             return false;
@@ -1422,7 +1447,7 @@ fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64)]) {
         let cb = unsafe { super::cmd::cb(c) };
         rs.run(&cb.cmds);
         rs.end_compute();
-        if rs.pass.take().is_some() {
+        if rs.pass.take().is_some_and(|p| !p.empty) {
             rs.put(op::PASS_END, |_| {});
         }
     }
