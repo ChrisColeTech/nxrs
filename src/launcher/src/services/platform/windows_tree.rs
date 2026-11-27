@@ -16,11 +16,14 @@ use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUS
 
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 
-/// No console, and suspended until it has joined its job.
+/// No console, below normal priority (an engine job is a build, an update check or a DLC sync:
+/// batch work that must not starve the desktop or a running game, WEB-WFREEZE; everything it starts
+/// inherits the class), and suspended until it has joined its job.
 pub fn prepare_tree(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
-    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS);
 }
 
 /// SAFETY: a thread snapshot of the system, and the threads of our own child resumed.
@@ -107,5 +110,28 @@ impl Drop for Tree {
                 CloseHandle(self.job);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::System::Threading::GetPriorityClass;
+
+    /// An engine job runs below normal (WEB-WFREEZE): its compilers inherit the class.
+    #[test]
+    fn an_engine_job_runs_below_normal() -> Result<(), std::io::Error> {
+        use std::os::windows::io::AsRawHandle;
+        let mut cmd = super::Command::new("cmd.exe");
+        cmd.args(["/c", "ping", "-n", "2", "127.0.0.1"])
+            .stdout(std::process::Stdio::null());
+        super::prepare_tree(&mut cmd);
+        let mut child = cmd.spawn()?;
+        let tree = super::Tree::adopt(&child);
+        // SAFETY: our own child's process handle, still open.
+        let class = unsafe { GetPriorityClass(child.as_raw_handle() as super::HANDLE) };
+        tree.terminate(std::time::Duration::ZERO);
+        child.wait()?;
+        assert_eq!(class, super::BELOW_NORMAL_PRIORITY_CLASS);
+        Ok(())
     }
 }

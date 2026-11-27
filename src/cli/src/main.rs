@@ -26,6 +26,7 @@ mod fpsfind;
 mod mods;
 mod out;
 mod pipeline;
+mod priority;
 mod profile;
 mod shaderimport;
 mod shaderxlate;
@@ -1001,6 +1002,8 @@ fn free_bytes(dir: &Path) -> Option<u64> {
 }
 
 fn main() {
+    // below normal before anything else, so every tool the build starts inherits it (WEB-WFREEZE)
+    priority::lower();
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some(s) if SUBCOMMANDS.contains(&s) => run_v2(args),
