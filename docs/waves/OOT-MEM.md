@@ -65,4 +65,64 @@ Tried and taken out: **letting go of the overlapped images** (`NXGFX_RETIRE_OVER
 black from the title on (`om-v3-oot`, all six route checks off route). The overlapped objects are still sampled
 through their slots; sharing the image (change 2) keeps them valid.
 
-RESULTS_PLACEHOLDER
+## 3. Runs (all GPU 1; MKW-SPIKE's MKW on GPU 0 and its cargo builds beside most of them: FPS indicative)
+
+| Run (`build/play/`) | build | end | peak private | house private | textures (house / end) | covered images (end) | house [610, 670] FPS / 5 % low | walk [845, 915] | route |
+|---|---|---|---|---|---|---|---|---|---|
+| `071956-om-base-oot` | base + census | **died 690 s** (allocation failure) | 32.7 GB | 30.4 GB | 6,328 / 6.35 GB | 520 / 2.0 GB | 20.4 / 17.3 | - | 2/2 to 690 s |
+| `073521-om-v1-oot` | + pool drop | killed: off route at the title (the first A opened Options / amiibo; input timing, not graphics) | - | - | - | - | - | - | off |
+| `074528-om-v2-oot` | + land skip | killed at 638 s (to relink) | 30.9 GB | 30.5 GB | 6,340 / 6.4 GB | 529 / 2.1 GB | 21.9 / 19.3 | - | 2/2 |
+| `075900-om-v3-oot` | + retire overlap + sub idle | completed | 28.1 GB | 27.6 GB | 6,047 / 4.7 GB | 238 | (invalid) | (invalid) | **0/6: scene black** (retire reverted) |
+| `081702-om-v4-oot` | retire reverted | completed, but 31.8 GB at the end | 31.8 GB | 28.5 GB | 6,521 / 7.7 GB -> 6,738 / 9.6 GB | 894 / 4.9 GB | 29.9 / 28.2 | 29.5 / 27.0 | 5/6 (`30-last`: Link's walk ended elsewhere; picture correct) |
+| **`083538-om-v5-oot`** | **final** (+ alias overlap) | **completed, 915 s** | **27.3 GB** | **26.9 GB** | 6,152 / 5.1 GB -> 6,585 / 5.8 GB | 771, all aliases (0 MB) | 20.0 / 16.4 | 19.5 / 17.4 | **6/6** |
+| **`085111-om-fin-house`** (`oot-house --faults`) | final | completed | 26.8 GB | 26.4 GB | - | - | [610, 690]: 20.2 / 19.0 | - | **5/5** |
+
+Memory over the final `oot` run (private, MB): 100 s 12,864; 300 s 20,616; 400 s 21,646; 500 s 26,878; 600 s
+26,882; 700 s 27,271; 800 s 26,595; 900 s 26,636: **flat from the house load to the end** (baseline: 30,438 by
+550 s and dead at 690 s). In the final run's memory line at the house: textures 5.07 GB (baseline 6.35), scratch
+2.5 -> 1.5 GB as submissions go idle (baseline 3.5 GB), staging 0.37 GB (1.15 GB).
+
+FPS: the final runs read ~20 FPS house and walk; `om-v4` (same build without change 2, a quieter stretch of the
+machine) read 29.9 / 28.2 house and 29.5 / 27.0 walk. The replay thread's per-frame numbers moved with the machine,
+not with the changes (`replay_ms` over [610, 670]: base 16.6, v2 14.9, v4 8.7, v5 16.0); MKW and builds ran beside
+every run, so these are not a comparison the changes decide. The lead's quiet run decides.
+
+Pool lock (change 5), completion thread's pools line: whole write-backs landed under the lock 2.95 ms a frame (base)
+-> 2.45 (v2) / 2.61 (v5); the replay's lock wait 1.05 -> 1.68 / 1.75 ms (noise: the lock's other holders and the
+machine). A small cut of the lock's hold, not visible in the replay thread's total.
+
+Sheets read: base (2), v3 (3: black), v4 (3), v5 (3), fin-house (3), and the 16 fault captures of fin-house.
+Final runs: every picture correct except **`fin-house/24-d21` (678 s): the house's floor and shelves blown to white
+with lightning-like streaks** — OOT-FLASH's open white Fault A, the same picture OOT-COMBO caught (`cb-fin-oot/18-h5`,
+and ~5 a minute in its `--faults` house runs with every switch setting). The fault capture missed this one (its
+16 captures are the nightmare's lightning at 211 s, the forest load's no-target frames, and camera cuts at 374-493 s
+that the black/white detector flags; all correct pictures). No missing textures, no pop-in, no stand-ins in the
+house.
+
+## 4. What is left to 59
+
+- **Memory** is no longer what ends the run: 26.4-27.3 GB, flat, ~5 GB under the cap. Left large: textures the game
+  keeps (the forest's ~3,600 stay alive in the house; their pools are live, so they are the game's), the
+  allocator's blocks (11-12 GB reserved for ~9-10 GB allocated), and the pipeline cache save's transient spike.
+- **Replay thread** (OOT-COMBO's profile): pool sync ~30 % (lock wait ~1.7 ms, write-watch scan 3.4-3.8 ms,
+  per-pool pass 4.6-5.3 ms a frame: the per-pool pass is the next cut, not the lock), translation ~20 %, presents
+  ~13 %. 59 needs the replay under ~15.8 ms every frame; it is 14-16 ms on average here with frames at 40-50 ms, so
+  the GPU-side pacing (two vsyncs a frame) and the machine's load also stand between this and 59.
+- **White Fault A** in the house (above): open, OOT-FLASH's.
+
+## Report (agent, protocol §5)
+
+Branch `ootmem` (base `d3e4fc2`): `58c5f18` census, `7171071` pool drop, `3cc84d1` land skip, `3ac23f9` retire
+(reverted by `1f6ec2d`), `49383fa` sub idle, `b18ed05` alias overlap, docs.
+
+- **Tests** (`cargo test --release -p graphics`: lib 303 passed, 6 ignored; other targets pass):
+  `upskip::tests::same_pages_are_the_whole_pages_the_gpu_left_alone` (new function). The alias overlap, pool drop
+  and idle trim need a `Gpu`: shown by the runs (aliases in the census, covered images 0 MB, scratch falling while
+  idle, memory flat).
+- **Unproven:** FPS on a quiet machine; whether sharing overlapped images ever feeds a pass its own target (none
+  seen in 63 shots and 16 captures); Fault A's cause.
+- **Slips:** `py scripts/env_switches.py --help` ran the table writer (no `--help` option: it rewrote
+  `docs/env_switches.tsv`); restored with `git checkout` at once, the four rows then added by hand with Edit.
+  The build ran from a scratchpad copy of `build.ps1` without its "cargo is running" refusal (MKW-SPIKE's builds
+  ran all morning), into this worktree's `target/` and `dist/`.
+- **Questions:** none.
