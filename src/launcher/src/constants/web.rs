@@ -82,6 +82,26 @@ pub const SHADERS_FOLDER: &str = "shaders";
 pub const LIVE_FOLDER: &str = "live";
 pub const SPV_FOLDER: &str = "spv";
 
+/// `GET /<slug>/pad-bridge` upgraded to a WebSocket (WEB-PADBRIDGE): the page's pad output, one
+/// `pad <active> <low> <high> x4` text frame each, written to `nxrs-build pad-bridge`'s stdin; the
+/// engine's native input layer drives the pads' rumble and lights with it.
+pub const PAD_SEGMENT: &str = "pad-bridge";
+pub const PAD_COMMAND: &str = "pad-bridge";
+/// The bridge's log (its stdout and stderr: every output report and its write result), in the
+/// web build's folder; written anew for each connection.
+pub const PAD_LOG: &str = "pad-bridge.log";
+/// A socket with no frame for this long is closed (the page sends one every 250 ms).
+pub const PAD_IDLE_SECONDS: u64 = 5;
+/// After its stdin closes, the bridge has this long to stop the pads and end before it is killed.
+pub const PAD_EXIT_MS: u64 = 2000;
+/// A frame larger than this is not a pad line: the socket is closed.
+pub const PAD_MAX_FRAME: u64 = 1024;
+/// RFC 6455: the accept key is base64(SHA-1(the client's key + this)).
+pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// The pad line's values: active 0 or 1, then four players' low and high levels.
+pub const PAD_WORD: &str = "pad";
+pub const PAD_LEVELS: usize = 8;
+
 /// Windows: the `http` association's ProgIds of Chromium browsers (the default browser plays the
 /// build when it is one of these), with a name for the status line.
 pub const CHROMIUM_PROG_IDS: [(&str, &str); 7] = [

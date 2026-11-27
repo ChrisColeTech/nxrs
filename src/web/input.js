@@ -9,7 +9,9 @@
 // (0..65535; 0 while the game does not own input). Each poll plays them on gamepad i through its vibrationActuator
 // ('dual-rumble': strong = low motor, weak = high motor), re-issued before an effect ends while the level holds,
 // reset at zero; nothing while the menu is open, on blur or while the page is hidden. A DualSense has no actuator in
-// Chrome on Windows: its levels go to hid-rumble.js (WebHID, the native engine's output report) instead.
+// Chrome on Windows: its levels go to hid-rumble.js (WebHID, the native engine's output report) instead. Served by
+// the launcher, the levels and whether the game owns input go to its pad bridge instead (pad-bridge.js,
+// WEB-PADBRIDGE), which drives every pad's rumble and lights natively; the two paths above then stay idle.
 //
 // The menu (menu.js) opens with Esc, a gamepad's Home (standard button 16) or Minus + Plus held 1 s. While it is open
 // nothing reaches the game: keys go to the menu, the block's keys and pads are released, and a button still held when
@@ -148,6 +150,7 @@ const NxrsInput = (() => {
   }
   // every gamepad still rumbling stops (menu open, blur, hidden: the next frame may not come while hidden)
   function stopAllRumble(why) {
+    NxrsPadBridge.stop(why);
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const i of [...rumbling.keys()]) stopRumble(i, list[i] && list[i].vibrationActuator, why);
     NxrsHid.stopAll(why);
@@ -155,6 +158,13 @@ const NxrsInput = (() => {
   // The engine's motor levels to the gamepads; a DualSense (no actuator in Chrome on Windows) through WebHID.
   function pollRumble(list) {
     const on = w && !menuOpen && focusState() === 1;
+    // the launcher's pad bridge drives every pad natively (rumble and lights): the page plays nothing itself
+    if (NxrsPadBridge.drives()) {
+      const levels = [];
+      for (let i = 0; i < 8; i++) levels.push(on ? Atomics.load(w, RUMBLE + i) : 0);
+      NxrsPadBridge.update(!!on, levels);
+      return;
+    }
     const hidPads = [];
     for (let i = 0; i < 4; i++) {
       const g = list[i];
@@ -275,6 +285,12 @@ const NxrsInput = (() => {
   addEventListener('focus', setFocus);
   document.addEventListener('visibilitychange', setFocus);
   addEventListener('gamepadconnected', (e) => console.log(`[nxrs] [web] gamepad ${e.gamepad.index}: ${e.gamepad.id} (${e.gamepad.mapping || 'no standard mapping'})`));
+  // the bridge takes over: effects the page started stop, WebHID writes nothing more
+  NxrsPadBridge.onOpen(() => {
+    const list = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const i of [...rumbling.keys()]) stopRumble(i, list[i] && list[i].vibrationActuator, 'pad bridge');
+    NxrsHid.stopAll('pad bridge');
+  });
   requestAnimationFrame(pollPads);
   return {
     publish,
@@ -284,6 +300,7 @@ const NxrsInput = (() => {
     padBits,
     // menu.js: a connected gamepad Chrome cannot rumble that WebHID can (a DualSense), or null
     hidPad() {
+      if (NxrsPadBridge.drives()) return null; // the launcher's bridge rumbles it: no permission to ask for
       const list = navigator.getGamepads ? navigator.getGamepads() : [];
       for (let i = 0; i < list.length; i++) {
         const g = list[i];

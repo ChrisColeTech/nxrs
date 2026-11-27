@@ -25,6 +25,9 @@ struct Request {
     /// the `Host` header: an imported web game is served at the root of its own host
     host: Option<String>,
     if_none_match: Option<String>,
+    /// `Upgrade: websocket` and its `Sec-WebSocket-Key` (the pad bridge)
+    upgrade: bool,
+    ws_key: Option<String>,
 }
 
 /// Reads one request head; None at the connection's end or on a malformed head.
@@ -52,6 +55,8 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
                 accept: None,
                 if_none_match: None,
                 host: None,
+                upgrade: false,
+                ws_key: None,
             });
             continue;
         };
@@ -67,6 +72,8 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
                 "accept-encoding" => rq.accept = Some(v.to_string()),
                 "if-none-match" => rq.if_none_match = Some(v.to_string()),
                 "host" => rq.host = Some(v.to_string()),
+                "upgrade" => rq.upgrade = v.eq_ignore_ascii_case("websocket"),
+                "sec-websocket-key" => rq.ws_key = Some(v.to_string()),
                 _ => {}
             }
         }
@@ -160,6 +167,11 @@ pub fn serve(stream: TcpStream, mounts: &Mounts) {
     };
     let mut r = BufReader::with_capacity(c::MAX_HEAD, stream);
     while let Some(req) = read_head(&mut r) {
+        // the page's pad output (WEB-PADBRIDGE): the connection is the bridge's from here on
+        if super::pad_bridge::wants(&req.method, &req.path, req.upgrade) {
+            let key = req.ws_key.as_deref();
+            return super::pad_bridge::serve(&mut r, &mut out, &req.path, key, mounts);
+        }
         // a run-time shader to translate (WEB-W7b): the route reads its own body
         if super::web_xlate::wants(&req.method, &req.path) {
             let kept = super::web_xlate::serve(&mut r, &mut out, &req.path, req.length, mounts);

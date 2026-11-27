@@ -1465,6 +1465,7 @@ dependencies = [
  "clap",
  "flate2",
  "libc",
+ "os",
  "profiles",
  "serde_json",
  "sha2",

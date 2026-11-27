@@ -39,6 +39,8 @@ pub const HOST_FILES: &[(&str, &str)] = &[
     ("menu.css", include_str!("../../web/menu.css")),
     // WEB-RUMBLE-HID: the DualSense's motors through WebHID
     ("hid-rumble.js", include_str!("../../web/hid-rumble.js")),
+    // WEB-PADBRIDGE: rumble and lights through the launcher's pad bridge
+    ("pad-bridge.js", include_str!("../../web/pad-bridge.js")),
 ];
 
 /// The engine's version for `build.json`: a release's `engine.json` beside nxrs-build (its commit), else
@@ -173,13 +175,15 @@ mod tests {
                 "gpu-worker.js",
                 "menu.js",
                 "menu.css",
-                "hid-rumble.js"
+                "hid-rumble.js",
+                "pad-bridge.js"
             ]
         );
         // what index.html loads and what boot.js and gpu.js start are all here
         let file = |n: &str| HOST_FILES.iter().find(|(f, _)| *f == n).unwrap().1;
         for n in [
             "hid-rumble.js",
+            "pad-bridge.js",
             "input.js",
             "saves.js",
             "gpu.js",
@@ -206,7 +210,7 @@ mod tests {
         std::fs::write(d.join("game.wasm"), b"wasm!").unwrap();
         std::fs::write(d.join("data.json"), b"{}").unwrap();
         let line = write(&d, &data, "X Y", Some(0x0100_4060_145c_0000)).unwrap();
-        assert!(line.contains("11 files (11 updated)"), "{line}");
+        assert!(line.contains("12 files (12 updated)"), "{line}");
         for (n, t) in HOST_FILES {
             assert_eq!(std::fs::read_to_string(d.join(n)).unwrap(), *t);
         }
@@ -224,10 +228,10 @@ mod tests {
             .as_str()
             .is_some_and(|v| !v.is_empty()));
         let files = j["files"].as_array().unwrap();
-        // eleven host files, the loader, the module, the manifest, the font's license; no bootset.json, cold module,
+        // twelve host files, the loader, the module, the manifest, the font's license; no bootset.json, cold module,
         // symbols or compressed copies here, so none listed
-        assert_eq!(files.len(), 15);
-        assert_eq!(files[14]["role"], "license");
+        assert_eq!(files.len(), 16);
+        assert_eq!(files[15]["role"], "license");
         assert_eq!(
             std::fs::read_to_string(d.join(HIND_LICENSE.0)).unwrap(),
             HIND_LICENSE.1
@@ -236,15 +240,16 @@ mod tests {
         assert_eq!(files[7]["path"], "gpu-worker.js");
         assert_eq!(files[9]["path"], "menu.css");
         assert_eq!(files[10]["path"], "hid-rumble.js");
+        assert_eq!(files[11]["path"], "pad-bridge.js");
         assert_eq!(
-            files[11],
+            files[12],
             serde_json::json!({"path": "game.js", "size": 2, "role": "loader"})
         );
         assert_eq!(
-            files[12],
+            files[13],
             serde_json::json!({"path": "game.wasm", "size": 5, "role": "module"})
         );
-        assert_eq!(files[13]["role"], "manifest");
+        assert_eq!(files[14]["role"], "manifest");
         let html = &files[0];
         assert_eq!(html["role"], "host");
         assert_eq!(html["size"], HOST_FILES[0].1.len() as u64);

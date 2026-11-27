@@ -26,6 +26,7 @@ pub mod qtjson;
 pub mod shader_xlate;
 pub mod update_text;
 pub mod web_build;
+pub mod ws;
 
 #[cfg(test)]
 mod layout_tests;
@@ -33,3 +34,5 @@ mod layout_tests;
 mod model_tests;
 #[cfg(test)]
 mod web_tests;
+#[cfg(test)]
+mod ws_tests;

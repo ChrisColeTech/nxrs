@@ -17,6 +17,7 @@ pub mod legacy;
 pub mod library_file;
 pub mod library_ops;
 pub mod markers;
+pub mod pad_bridge;
 pub mod pickers;
 pub mod piped_run;
 pub mod platform;
