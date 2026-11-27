@@ -97,6 +97,12 @@ build folders > Move (a readout and a ghost button, the Engine > Checks pattern)
 
 ## Send-back 2 (owner via lead): one dialog grammar app-wide
 
+**Owner verdict (2026-11-26): rejected; superseded by `docs/waves/DIALOGS.md`.** Footers kept redundant
+Close / Cancel / No beside the header's X; message and question boxes had a bare ringed mark and no heading; and
+this inventory counted popovers (Search & Filter, Build tools), menus and the build output as dialogs. They are not
+dialogs (guide §5): their captures moved to `docs/images/popovers/`. Rules 2, 3 and 8 below are replaced by the
+guide's current §5.
+
 ### Inventory (before; captures in `build/dialogs/before/<name>-0.png`, launcher at 02b234a + capture flags)
 
 Checked against `docs/ARCHITECTURE-AND-STYLE-GUIDE.md` §5 and the AGENTS.md family grammar. "Shared header" =

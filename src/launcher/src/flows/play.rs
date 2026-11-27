@@ -2,7 +2,7 @@
 //! INI settings, the detached start.
 
 use super::{App, DlcReason};
-use crate::constants::words_play as w;
+use crate::constants::{words_contexts as c, words_play as w};
 use crate::model::dates;
 use crate::services::{dlc_files, ini_file, platform};
 
@@ -14,7 +14,7 @@ impl App {
             return;
         }
         if f.source_offline() {
-            self.message(w::OFFLINE_TITLE, w::OFFLINE, true);
+            self.message(c::PLAY, w::OFFLINE_TITLE, w::OFFLINE, true);
             return;
         }
         if self.dlc_busy() {
@@ -53,7 +53,7 @@ impl App {
         if let Err(err) =
             ini_file::write_game_settings(&game, &self.lib.button_layout, &self.lib.play())
         {
-            self.message(w::NO_SETTINGS, &err, true);
+            self.message(c::PLAY, w::NO_SETTINGS, &err, true);
             return;
         }
         match platform::launch_detached(
@@ -61,7 +61,7 @@ impl App {
             &game.build_dir,
             &self.tools.environment(),
         ) {
-            Err(err) => self.message(w::NOT_LAUNCHED, &err, true),
+            Err(err) => self.message(c::PLAY, w::NOT_LAUNCHED, &err, true),
             Ok(pid) => {
                 self.running.insert(game.id.clone(), pid);
                 if let Some(g) = self.lib.find_mut(&game.id) {
@@ -91,7 +91,7 @@ impl App {
         if platform::request_close(pid, &exe) {
             self.job_label = w::CLOSE_ASKED.into();
         } else {
-            self.message(w::NO_CLOSE_TITLE, w::NO_CLOSE, false);
+            self.message(c::STOP, w::NO_CLOSE_TITLE, w::NO_CLOSE, false);
         }
     }
 }

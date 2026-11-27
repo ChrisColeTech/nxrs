@@ -21,8 +21,9 @@ pub const CANNOT_IMPORT: &str = "Cannot import build";
 pub const BUSY_TITLE: &str = "Game is busy";
 pub const BUSY_IMPORT: &str = "Wait for this game's build or run to finish before importing it.";
 pub const REMOVE_TITLE: &str = "Remove from library";
-pub const REMOVE_TEXT: &str =
-    "Remove “{}” from the library?\n\nThe game's package is never deleted.";
+pub const REMOVE_HEADING: &str = "Remove “{}” from the library?";
+pub const REMOVE_TEXT: &str = "The game's package is never deleted.";
+pub const REMOVE_VERB: &str = "Remove";
 pub const DELETE_BUILD: &str = "Also delete the build ({})";
 pub const DELETE_BUILD_TIP: &str = "Deletes the build folder {}. Saves, SD card files, cheats and \
     mods are moved first to {}; when the game is added and built again they go back into it. \

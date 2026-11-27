@@ -37,7 +37,12 @@ impl App {
         build.button_layout = effective_button_layout(&game, &self.lib.button_layout);
         if let Err(err) = self.start_build_job(build, web) {
             self.outcomes.push(Outcome::Smoke(false));
-            self.message(w::CANNOT_START, &err, true);
+            self.message(
+                crate::constants::words_contexts::BUILD,
+                w::CANNOT_START,
+                &err,
+                true,
+            );
             self.refresh_facts();
             return;
         }

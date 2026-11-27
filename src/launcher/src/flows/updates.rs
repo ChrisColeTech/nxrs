@@ -28,7 +28,12 @@ impl App {
             self.update_quiet = false;
             self.outcomes.push(Outcome::Update(!error, text.into()));
         } else {
-            self.message(title, text, error);
+            self.message(
+                crate::constants::words_contexts::UPDATES,
+                title,
+                text,
+                error,
+            );
         }
     }
 

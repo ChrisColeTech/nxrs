@@ -28,7 +28,7 @@ impl App {
             self.dlc_quiet = false;
             self.outcomes.push(Outcome::Dlc(!error, text.into()));
         } else if !text.is_empty() {
-            self.message(title, text, error);
+            self.message(crate::constants::words_contexts::DLC, title, text, error);
         }
     }
 
@@ -126,7 +126,10 @@ impl App {
             if !problems.is_empty() {
                 match self.dlc_window() {
                     Some(win) => win.status = Some((problems.join("\n"), true)),
-                    None => self.message(w::CANNOT_INSTALL, &problems.join("\n"), true),
+                    None => {
+                        let context = crate::constants::words_contexts::DLC;
+                        self.message(context, w::CANNOT_INSTALL, &problems.join("\n"), true)
+                    }
                 }
             }
             return true;
