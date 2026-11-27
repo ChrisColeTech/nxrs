@@ -2632,6 +2632,15 @@ fn source_image(
     let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent))
 }
+/// Copies traced (`NXGFX_COPY_TRACE`).
+static COPY_TRACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `NXGFX_COPY_TRACE=1` (diagnostics): every texture copy into a sparse texture is logged (at most 4000).
+fn copy_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_COPY_TRACE").as_deref() == Ok("1"))
+}
+
 /// The resolution scale of a texture's image (1 when nothing is scaled).
 fn img_scale(g: &Gpu, serial: u64) -> f32 {
     if !super::scale::active() {
@@ -11202,6 +11211,20 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
             };
             let (ssl, soff, sext) = region_copy(&s, (c.has_sv != 0).then_some(&c.sv), &c.sr, &stf);
             let (dsl, doff, dext) = region_copy(&d, (c.has_dv != 0).then_some(&c.dv), &c.dr, &dtf);
+            // NXGFX_COPY_TRACE=1 (diagnostics, MKW-ATLAS): every copy into a sparse texture, its source, formats and
+            // the physical pages behind the destination layer's last tile and its page past the tiles
+            if copy_trace() && crate::nvn::vpool::is_sparse(d.mem as u64) {
+                let n = COPY_TRACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 4000 {
+                    let pages = super::sparse::layer_pages(di, dsl.base_array_layer);
+                    crate::vklog!(
+                        "copy trace {n}: ser{} {:?} {}x{} (levels {}) level {} layer {}+{} at {},{} {}x{} -> ser{} {:?} level {} layer {}+{} at {},{} {}x{}; dst layer's last tile / tail page physical {:x?}",
+                        s.serial, stf.vk, s.d.width, s.d.height, s.d.levels, ssl.mip_level, ssl.base_array_layer,
+                        ssl.layer_count, soff.x, soff.y, sext.width, sext.height, d.serial, dtf.vk, dsl.mip_level,
+                        dsl.base_array_layer, dsl.layer_count, doff.x, doff.y, dext.width, dext.height, pages
+                    );
+                }
+            }
             let (ss, ds) = (img_scale(g, s.serial), img_scale(g, d.serial));
             if ss != 1.0 || ds != 1.0 {
                 // resolution scale: a blit of the regions at each image's scale (the game's region sizes kept)
