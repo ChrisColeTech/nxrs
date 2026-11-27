@@ -329,6 +329,20 @@ pub fn create(g: &Gpu, t: &crate::nvn::obj::tex_t, ci0: &vk::ImageCreateInfo) ->
         mr.size >> 20,
         st.n_slots
     );
+    crate::vklog!(
+        "sparse image {}: ser{} storage {:#x} ({} pages; layers x pages {}), levels {}, Vulkan mip tail from {:?}",
+        st.imgs.len() + 1,
+        t.serial,
+        s.size,
+        s.size / PAGE,
+        s.layers as u64 * s.stride as u64,
+        s.nmips,
+        s.tail_req.map(|r| (
+            r.image_mip_tail_first_lod,
+            r.image_mip_tail_size,
+            r.image_mip_tail_stride
+        ))
+    );
     st.imgs.push(s);
     Some(image)
 }
