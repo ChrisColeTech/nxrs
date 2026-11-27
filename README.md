@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A Rust static recompiler and launcher for Switch and Switch 2 games. Add your NSP, NUP or game dump, build, play:
-as a native Windows or Linux program, or (preview) as WebAssembly + WebGPU that plays in Chrome.
+as a native Windows or Linux program, or as WebAssembly + WebGPU that plays in Chrome.
 
 > [!IMPORTANT]
 > No games, keys or firmware are included. Use your own legally obtained dumps and console keys.
@@ -59,7 +59,7 @@ FPS is the average during gameplay, with the slowest 5% in brackets.
 **While playing:** Xbox, DualSense, DualShock 4, Switch Pro and Joy-Con controllers, with rumble and motion.
 **F1** controls · **F3** screenshot · **F4** FPS limit · **F6** cheats · **F7** record video · **F11** fullscreen.
 
-## Play in the browser (preview)
+## Play in the browser
 
 nxrs can also build a game for the web: the same translated code compiled to WebAssembly (64-bit memory, threads,
 SIMD) with Emscripten, drawn with WebGPU, and played in a Chrome tab. There is still one **Build** and one **Play**;
