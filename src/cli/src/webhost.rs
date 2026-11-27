@@ -54,11 +54,30 @@ fn listed() -> Vec<(&'static str, &'static str)> {
     v.extend([
         ("game.js", "loader"),
         ("game.wasm", "module"),
+        // WEB-W6: the guest functions outside the recorded hot set (websplit.rs), loaded at the first cold call
+        (crate::websplit::COLD, "module"),
         (crate::webpack::MANIFEST, "manifest"),
         (crate::webpack::BOOTSET, "bootset"),
+        // the names of both modules' functions (they ship stripped), for reading a stack
+        (crate::websplit::SYMBOLS, "symbols"),
+        (HIND_LICENSE.0, "license"),
+    ]);
+    // precompressed copies a server sends with Content-Encoding: gzip (webzip.rs)
+    v.extend([
+        ("game.js.gz", "gzip"),
+        ("game.wasm.gz", "gzip"),
+        ("game.cold.wasm.gz", "gzip"),
+        ("data.json.gz", "gzip"),
     ]);
     v
 }
+
+/// The built-in fallback font's license (the engine embeds Hind on the web: os services/misc.rs `fallback_ttf`),
+/// written beside the page: the OFL asks that it travel with the font.
+pub const HIND_LICENSE: (&str, &str) = (
+    "LICENSES/hind-ofl.txt",
+    include_str!("../../../LICENSES/hind-ofl.txt"),
+);
 
 /// The `build.json` of the folder `outdir` (its files' sizes read from it).
 pub fn describe(
@@ -98,6 +117,12 @@ pub fn write(outdir: &Path, data: &Path, title: &str, title_id: Option<u64>) -> 
             changed += 1;
         }
     }
+    let lic = outdir.join(HIND_LICENSE.0);
+    if let Some(dir) = lic.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::write_if_changed(&lic, HIND_LICENSE.1.as_bytes())
+        .with_context(|| format!("writing {}", lic.display()))?;
     let d = describe(outdir, data, title, title_id, &engine_version());
     let text = serde_json::to_string_pretty(&d)?;
     std::fs::write(outdir.join(BUILD_JSON), text)
@@ -170,8 +195,15 @@ mod tests {
             .as_str()
             .is_some_and(|v| !v.is_empty()));
         let files = j["files"].as_array().unwrap();
-        // eight host files, the loader, the module, the manifest; no bootset.json here, so none listed
-        assert_eq!(files.len(), 11);
+        // eight host files, the loader, the module, the manifest, the font's license; no bootset.json, cold module,
+        // symbols or compressed copies here, so none listed
+        assert_eq!(files.len(), 12);
+        assert_eq!(files[11]["role"], "license");
+        assert_eq!(
+            std::fs::read_to_string(d.join(HIND_LICENSE.0)).unwrap(),
+            HIND_LICENSE.1
+        );
+        assert!(HIND_LICENSE.1.contains("SIL OPEN FONT LICENSE"));
         assert_eq!(files[7]["path"], "gpu-worker.js");
         assert_eq!(
             files[8],

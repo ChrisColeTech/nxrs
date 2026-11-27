@@ -363,12 +363,13 @@ fn fallback_ttf() -> Option<(Vec<u8>, std::path::PathBuf)> {
     if let Ok(p) = std::env::var("NXOS_FONT") {
         return std::fs::read(&p).ok().map(|d| (d, p.into()));
     }
-    // the web: the system font the build machine had, copied into the data folder by the web build (a page sees no
-    // system fonts; without one the game waited for its shared font for ever at Anime Girls' first level load)
+    // the web: a page sees no system fonts (without one the game waited for its shared font for ever at Anime Girls'
+    // first level load), and a system font may not be redistributed in a web build: the repository's own OFL font
+    // (Hind, LICENSES/hind-ofl.txt, which the web build carries beside the page)
     #[cfg(target_os = "emscripten")]
     {
-        let p = crate::boot::try_process()?.data_dir.join("fonts").join("fallback.ttf");
-        return std::fs::read(&p).ok().map(|d| (d, p));
+        static HIND: &[u8] = include_bytes!("../../third_party/fonts/Hind-Regular.ttf");
+        return Some((HIND.to_vec(), "Hind-Regular.ttf (built in)".into()));
     }
     #[allow(unreachable_code)]
     let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());

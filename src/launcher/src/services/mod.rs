@@ -24,6 +24,7 @@ pub mod sources;
 pub mod startup_log;
 pub mod toolchain;
 pub mod update_files;
+pub mod web_file;
 pub mod web_reply;
 pub mod web_serve;
 

@@ -38,6 +38,11 @@ pub const ISOLATION_HEADERS: [(&str, &str); 3] = [
     ("Cross-Origin-Embedder-Policy", "require-corp"),
     ("Cross-Origin-Resource-Policy", "same-origin"),
 ];
+/// A file's precompressed copy beside it (nxrs-build's webzip.rs).
+pub const GZIP_SUFFIX: &str = ".gz";
+/// Files: kept by the browser and revalidated by ETag; other answers: not kept.
+pub const CACHE_FILES: &str = "no-cache";
+pub const CACHE_NONE: &str = "no-store";
 /// URL path segment that maps to the build's data folder.
 pub const DATA_SEGMENT: &str = "data";
 

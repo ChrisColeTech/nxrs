@@ -32,7 +32,7 @@ fn files(data: &Path) -> Result<Vec<(String, u64, u64)>> {
                 if rel != "save" && rel != "shaders" {
                     walk(root, &p, out)?;
                 }
-            } else if rel != RECORDING && rel != MANIFEST {
+            } else if rel != RECORDING && rel != MANIFEST && rel != crate::websplit::HOTSET {
                 let m = e.metadata()?;
                 let t = m
                     .modified()
@@ -101,10 +101,22 @@ pub fn bootset(
 pub fn write(outdir: &Path, data: &Path, title: &str) -> Result<String> {
     let files = files(data)?;
     let ver = version(&files);
+    // game data as compressed extents beside the page (webzip.rs), each listed with its extent ends
+    let (zends, zraw, zcomp) = crate::webzip::compress_data(outdir, data, &files)?;
     let manifest = serde_json::json!({
         "version": ver,
         "title": title,
-        "files": files.iter().map(|(p, n, _)| serde_json::json!([p, n])).collect::<Vec<_>>(),
+        "files": files
+            .iter()
+            .map(|(p, n, _)| match zends.get(p) {
+                Some(e) => {
+                    let mut z = vec![crate::webzip::EXTENT as u64];
+                    z.extend_from_slice(e);
+                    serde_json::json!([p, n, z])
+                }
+                None => serde_json::json!([p, n]),
+            })
+            .collect::<Vec<_>>(),
     });
     let text = manifest.to_string();
     std::fs::write(outdir.join(MANIFEST), &text)?;
@@ -142,9 +154,12 @@ pub fn write(outdir: &Path, data: &Path, title: &str) -> Result<String> {
     };
     std::fs::write(outdir.join(BOOTSET), boot.to_string())?;
     Ok(format!(
-        "Web data: {} files, {:.1} MiB in {MANIFEST} (version {ver}); {said}",
+        "Web data: {} files, {:.1} MiB in {MANIFEST} (version {ver}); {} compressed in extents, {:.1} -> {:.1} MiB; {said}",
         files.len(),
-        files.iter().map(|f| f.1).sum::<u64>() as f64 / 1048576.0
+        files.iter().map(|f| f.1).sum::<u64>() as f64 / 1048576.0,
+        zends.len(),
+        zraw as f64 / 1048576.0,
+        zcomp as f64 / 1048576.0
     ))
 }
 

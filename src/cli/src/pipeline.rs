@@ -1228,16 +1228,48 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                 cc::link_dll(&clang, &objs, engine, &obj, &dll)?;
                 cc::link_exe(&clang, &obj, &exe)?;
             }
-            None => match cc::find_web_lib() {
-                Some(lib) => {
-                    out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
-                    cc::link_web(&clang, &objs, Some(&lib), &obj, &exe)?;
+            None => {
+                // the hot/cold split (websplit.rs) when the data folder has a recorded hot set and NXRS_WEB_SPLIT=1:
+                // opt-in until a split build is shown running in Chrome (WEB-W6: it stalled after the swap chain's
+                // creation, docs/waves/WEB-W6.md)
+                let hot = crate::websplit::hot_set(&data)
+                    .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() == Ok("1"));
+                match cc::find_web_lib() {
+                    Some(lib) => {
+                        out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
+                        cc::link_web(&clang, &objs, Some(&lib), &obj, &exe, hot.is_some())?;
+                    }
+                    None => {
+                        out.say("  no web engine library (scripts/build/web.ps1 -Crates os): the runtime's symbols are imports");
+                        cc::link_web(&clang, &objs, None, &obj, &exe, hot.is_some())?;
+                    }
                 }
-                None => {
-                    out.say("  no web engine library (scripts/build/web.ps1 -Crates os): the runtime's symbols are imports");
-                    cc::link_web(&clang, &objs, None, &obj, &exe)?;
+                let dir = exe.parent().unwrap_or(Path::new("."));
+                match (&hot, &clang.web) {
+                    (Some(h), Some(e)) => {
+                        timings.push(("link", t.elapsed().as_secs_f64()));
+                        let t = Instant::now();
+                        for l in crate::websplit::split(
+                            dir,
+                            &e.root,
+                            h,
+                            translator::loader::layout::FIRST_BASE,
+                            translator::loader::layout::WEB_FIRST_BASE,
+                        )? {
+                            out.say(&l);
+                        }
+                        timings.push(("split", t.elapsed().as_secs_f64()));
+                        return Ok(());
+                    }
+                    _ => {
+                        crate::websplit::clean_unsplit(dir);
+                        out.say(&format!(
+                            "  one module (split: a {} in the data folder and NXRS_WEB_SPLIT=1)",
+                            crate::websplit::HOTSET
+                        ));
+                    }
                 }
-            },
+            }
         }
         timings.push(("link", t.elapsed().as_secs_f64()));
         Ok(())
@@ -1267,26 +1299,37 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     });
     built?;
     if a.web {
-        // the shared-font fallback a native run reads from the system's fonts: a page has none, so the web build
-        // carries this machine's (os services/misc.rs `fallback_ttf`)
-        let fonts = data.join("fonts");
-        if !fonts.join("fallback.ttf").is_file() {
-            let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-            let found = ["arial.ttf", "segoeui.ttf", "tahoma.ttf"]
-                .iter()
-                .map(|n| std::path::Path::new(&w).join("Fonts").join(n))
-                .find(|p| p.is_file());
-            match found {
-                Some(src) => {
-                    std::fs::create_dir_all(&fonts)?;
-                    std::fs::copy(&src, fonts.join("fallback.ttf"))?;
-                    out.say(&format!("  shared-font fallback: {}", src.display()));
-                }
-                None => out.say("  no system font to carry as the shared-font fallback: games that wait for one will not start"),
-            }
+        // the shared-font fallback is the engine's built-in OFL font on the web (os services/misc.rs `fallback_ttf`;
+        // its license goes beside the page, webhost.rs). Builds before WEB-W6 copied this machine's system font
+        // here, which may not be redistributed: removed
+        let stale = data.join("fonts").join("fallback.ttf");
+        if stale.is_file() {
+            std::fs::remove_file(&stale)?;
+            let _ = std::fs::remove_dir(data.join("fonts"));
+            out.say("  removed fonts\\fallback.ttf (a system font an older web build copied; the engine has its own)");
         }
         // what the page streams and prefetches (docs/35 W3)
         out.say(&crate::webpack::write(&outdir, &data, &name)?);
+        // gzip copies of the modules and descriptions, sent with Content-Encoding (webzip.rs)
+        let t = Instant::now();
+        let mut zipped = vec![];
+        for f in ["game.wasm", crate::websplit::COLD, "game.js", crate::webpack::MANIFEST] {
+            match crate::webzip::gzip_file(&outdir.join(f))? {
+                Some((raw, z)) => zipped.push(format!(
+                    "{f} {:.1} -> {:.1} MiB",
+                    raw as f64 / 1048576.0,
+                    z as f64 / 1048576.0
+                )),
+                None => {
+                    let _ = std::fs::remove_file(crate::webzip::gz_path(&outdir.join(f)));
+                }
+            }
+        }
+        out.say(&format!(
+            "Web gzip copies: {} ({:.1}s)",
+            zipped.join(", "),
+            t.elapsed().as_secs_f64()
+        ));
         // the page, its workers and build.json: the folder is complete for any COOP/COEP server (docs/35 W5)
         out.say(&crate::webhost::write(&outdir, &data, &name, web_title_id)?);
     }

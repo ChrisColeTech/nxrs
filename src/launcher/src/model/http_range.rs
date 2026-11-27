@@ -81,6 +81,7 @@ pub fn reason(status: u16) -> &'static str {
         204 => "No Content",
         206 => "Partial Content",
         301 => "Moved Permanently",
+        304 => "Not Modified",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
