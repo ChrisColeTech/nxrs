@@ -4,19 +4,6 @@ Branch `launch-about`, recreated from `gameplay-harness` 1162e39 (the first pass
 3d12ad0 with the pre-guide message box; the lead sent it back, and its work was re-applied onto the current
 code). Launcher only (`src/launcher`); no titles, no GPU.
 
-**Second send-back (owner, 2026-11-27: About is too complex, "it just needs to be the app icon and name").**
-About is now its own surface (`Surface::About`, `ui/windows/about.rs`): window "About nxrs" with its X; the
-body header is the app's own icon (`icons::accent_glyph`, the title bar's, at `page::TILE` 32 pt) in the tile's
-place, the name "nxrs" in the heading type, and the version from the build (`NXRS_VERSION`, already set by
-`build.rs` and used by `main.rs`) as `v0.6.0` beside it in small muted type; no text (the dumps/keys, engine/MIT,
-controller and Website paragraphs are gone, and the `ABOUT` text constant with them). Footer unchanged: ghost
-Website and GitHub leading, filled OK last; OK, Enter, X and Escape close. The `links` field on messages and
-`message_with_links` were removed again (`message.rs` is back to the base); a command-line About prints
-`nxrs v0.6.0`. Style guide §5 Messages records the owner decision. The About test now asserts the name, the
-version, the absence of the old paragraphs, the URLs, and OK; the capture below is the new one
-(`docs/images/launch-about/about.png` = `docs/images/dialogs/about.png`). The sections below describe the first
-redo; where they mention About's text or heading tile, this paragraph supersedes them.
-
 ## Plan
 
 1. **About** (`Help > About nxrs`) is a message per style guide §5 as the current code draws it

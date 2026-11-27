@@ -12,8 +12,7 @@ use egui::{Color32, CornerRadius, Mesh, Sense, Stroke, StrokeKind, Ui, pos2, vec
 pub const LABEL: f32 = 190.0;
 const ROW: f32 = 28.0;
 const ROW_GAP: f32 = 6.0;
-/// The body header's icon tile (About draws the app icon at this size).
-pub const TILE: f32 = 32.0;
+const TILE: f32 = 32.0;
 
 /// The info mark: a ringed "i" whose tooltip is the explanation.
 pub fn info(ui: &mut Ui, tip: &str) {

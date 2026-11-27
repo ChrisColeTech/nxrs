@@ -103,10 +103,7 @@ dialog is built from the shared parts in `ui/popups/authored.rs` and `ui/widgets
   Updates, Library, Remove from library, Build folder, Save folder, Game log, About nxrs), **never the app's name
   alone**; the heading states the message itself (Cannot add game); the text under it. With no natural context, the
   message's own short title goes in the title bar and a fuller heading under it. Footer: one filled OK; OK, Enter,
-  the X and Escape close it. **About** (owner, 2026-11-27: "the app icon and name") is the one exception to the
-  line-glyph tile: its body header is the app's own icon (the title bar's, at the tile's size), the name "nxrs" and
-  the build's version beside it in small muted type, and no text; its footer is ghost Website and GitHub at the
-  leading side and the filled OK (`ui/windows/about.rs`).
+  the X and Escape close it.
 - **Questions** (`?`): the window title names the action (Remove from library); the heading is the question itself
   (Remove “Kart” from the library?); the rest is the text, a tick box as its last paragraph with its explanation in
   an info mark. The footer is one filled button named with its verb (Remove, Stop build and close), never Yes / No.

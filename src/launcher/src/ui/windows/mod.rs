@@ -1,6 +1,5 @@
 //! The dialogs: each open surface is shown in its modal child window every frame; a window whose
 //! surface closed is shut. Only the top surface takes input (a message over Properties, say).
-mod about;
 mod dlc;
 mod list_window;
 mod message;
@@ -53,7 +52,6 @@ fn spec<'a>(surface: &Surface, key: &'a str, title: &'a str) -> ChildSpec<'a> {
             text,
             ..
         } => message::spec((key, title), (heading(context, h), text), false),
-        Surface::About => about::spec(key, title),
         Surface::Question { ask, check, .. } => {
             let words = (ask.heading.as_str(), ask.text.as_str());
             message::spec((key, title), words, check.is_some())
@@ -133,7 +131,6 @@ fn title_of(app: &App, surface: &Surface) -> String {
                 context.clone()
             }
         }
-        Surface::About => crate::constants::words_contexts::ABOUT.into(),
         Surface::Question { ask, .. } | Surface::Choices { ask, .. } => ask.title.clone(),
         Surface::Properties(p) if p.adding => s::ADD_TITLE.into(),
         Surface::Properties(p) => format!("{}{}", p.game.title, s::PROPERTIES_TITLE),
@@ -151,8 +148,8 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
             title,
             text,
             error,
-        } => message::message(ui, heading(context, title), text, *error),
-        Surface::About => about::show(ui),
+            links,
+        } => message::message(ui, heading(context, title), text, (*error, links)),
         Surface::Question {
             ask,
             yes,

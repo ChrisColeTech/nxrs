@@ -11,7 +11,7 @@ use crate::flows::Action;
 use crate::flows::surface::{Ask, Check, Choice};
 use crate::ui::popups::{authored, child_window::ChildSpec};
 use crate::ui::theme;
-use crate::ui::widgets::{page, rail::Icon};
+use crate::ui::widgets::{button, page, rail::Icon};
 use egui::Ui;
 
 /// The heading row (tile, gaps) and a wrapped heading's extra line; text lines; the gap under it.
@@ -54,15 +54,31 @@ fn body(ui: &mut Ui, (icon, heading, error): (Icon, &str, bool), text: &str, bel
     }
 }
 
-/// A message's footer is its one filled OK; OK, Enter, the X and Escape close it.
-pub fn message(ui: &mut Ui, heading: &str, text: &str, error: bool) -> Reply {
+/// A message's footer is its one filled OK; OK, Enter, the X and Escape close it. Its own verbs
+/// (`links`: label, web address; About's Website and GitHub) are ghost buttons at the leading side.
+pub fn message(
+    ui: &mut Ui,
+    heading: &str,
+    text: &str,
+    (error, links): (bool, &[(String, String)]),
+) -> Reply {
     let icon = if error { Icon::Error } else { Icon::Info };
     body(ui, (icon, heading, error), text, p::FOOTER);
     let pal = theme::of(ui.ctx());
-    let ok = authored::footer_at_bottom(ui, &pal, (crate::constants::words_settings::OK, true, ""));
+    let mut actions = Vec::new();
+    let lead = |ui: &mut Ui| {
+        for (label, address) in links {
+            if button::ghost(ui, label, true).clicked() {
+                actions.push(Action::OpenUrl(address.clone()));
+            }
+        }
+    };
+    ui.add_space((ui.available_height() - p::FOOTER).max(0.0));
+    let ok = (crate::constants::words_settings::OK, true, "");
+    let ok = authored::footer_bar(ui, &pal, lead, ok);
     Reply {
         close: ok || ui.input(|i| i.key_pressed(egui::Key::Enter)),
-        ..Reply::default()
+        actions,
     }
 }
 
