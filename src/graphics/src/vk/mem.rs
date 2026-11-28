@@ -4463,25 +4463,56 @@ fn land_skip_same_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_LAND_SKIP_SAME").as_deref() != Ok("0"))
 }
 
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
+/// `flags`: per write-back, its landing flags when the GPU compared it (`wbdiff`: the bytes of pages it left as they
+/// were are not in `src` / `base`, so those pages are handed to the landing as unchanged whatever the switches say),
+/// else null.
+pub fn apply_writebacks(
+    g: &Gpu,
+    wbs: &[(u64, u64, u64, *const u8, *const u8, u64)],
+    flags: &[*const u32],
+    epoch: u64,
+    value: u64,
+) {
     if wbs.is_empty() {
         return;
     }
     let landed: Vec<(u64, u64)> = wbs.iter().map(|w| (w.1, w.2)).collect();
     let _done = InflightDone(landed);
+    let flag = |i: usize| flags.get(i).copied().unwrap_or(core::ptr::null());
+    let gpu_diff = flags.iter().any(|f| !f.is_null());
     // each write-back's pages compared with its baseline and hashed before the pool lock is taken (OOT-DESC: that work
     // under the lock held up the replay thread's syncs and lookups); it reads only the write-back's own buffers.
-    // `NXGFX_LAND_PRE=0`: done under the lock, as before
-    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
-        wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    // `NXGFX_LAND_PRE=0`: done under the lock, as before. A range the GPU compared takes its answer from its flags.
+    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() || gpu_diff {
+        wbs.iter()
+            .enumerate()
+            .map(|(i, w)| {
+                if !flag(i).is_null() {
+                    super::upskip::landing_pre_flags(w.1, w.2, w.3, flag(i))
+                } else if land_pre_on() {
+                    super::upskip::landing_pre(w.1, w.2, w.3, w.4)
+                } else {
+                    None
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
     // (OOT-MEM) every whole page the GPU left as the baseline has it, not only the re-armed ones: `land_changed`
     // compared each such page again under the pool lock (OoT: ~48 MB a frame, ~3 ms of the lock the replay thread's
     // syncs wait for) to find it writes nothing. `NXGFX_LAND_SKIP_SAME=0`: only the re-armed pages, as before
-    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() {
-        pres.iter().map(|p| p.as_ref().map(|p| p.same_pages()).unwrap_or_default()).collect()
+    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() || gpu_diff {
+        pres.iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if land_skip_same_on() || !flag(i).is_null() {
+                    p.as_ref().map(|p| p.same_pages()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -4781,6 +4812,7 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &super::lazy::summary(f)
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
+        + &super::wbdiff::report(f)
         + &web_summary(f)
 }
 

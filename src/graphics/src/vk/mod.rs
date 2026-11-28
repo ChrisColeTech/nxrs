@@ -49,6 +49,7 @@ pub mod tables;
 pub mod upscale;
 pub mod upskip;
 pub mod uptrace;
+pub mod wbdiff;
 pub mod xfb;
 
 use ash::vk;
