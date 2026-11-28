@@ -49,7 +49,8 @@ NXGFX_FAULT_MAX	diagnostic	`NXGFX_FAULT_MAX=<n>`: with NXGFX_FAULT_SHOTS, the ca
 NXGFX_FAULT_PER_REASON	diagnostic	`NXGFX_FAULT_PER_REASON=<n>`: with NXGFX_FAULT_SHOTS, the captures one reason (a red line kind, a white flash, a black flash) may write (default 4)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_SHOTS	diagnostic	`NXGFX_FAULT_SHOTS=<dir>` (`1`: `captures/faults`): fault-triggered captures. Every present is copied back and sampled; an engine anomaly (any red line, a zero stand-in bound, a draw with no render target) or a one-frame white/black flash writes that present (full size) and the one before (sampled) with a `fault capture N` log line. Off by default (one picture copy a frame); `play.py --faults` sets it	src/graphics/src/vk/shot/fault.rs
 NXGFX_FG_SHOT	diagnostic	`NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two	src/graphics/src/vk/framegen.rs
-NXGFX_FRAMEGEN	switch	`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
+NXGFX_FLUSH_QUEUE	switch	nvnMemoryPoolFlushMappedRange does not wait for the pool lock: a flush made while it is held is queued and taken by the lock's next sync before any pending range is read; `0`: wait for the lock	src/graphics/src/vk/mem.rs
+NXGFX_FRAMEGEN	switch`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
 NXGFX_FRAME_CSV	diagnostic	- `NXGFX_FRAME_CSV=<path>`: a row per frame (present interval, replay CPU time, GPU time, pipeline and upload	src/graphics/src/vk/perf.rs
 NXGFX_GLSLANG	path	the glslangValidator the graphics build compiles its own shaders with (default: the Vulkan SDK's)	src/graphics/build.rs
 NXGFX_GMEM_BACK_ALL	switch	OOT-FIX: every GPU-visible memory pool is in the raw global memory table (shaders' loads through pointers they read from memory); a pool no binding named gets its buffer for it (granule pools: bound where the guest's memory is committed and where the CPU writes). `0`: only pools some binding gave a buffer, as before (OoT's light-probe data read 0: exposure several times too bright)	src/graphics/src/vk/gmem.rs, src/graphics/src/vk/mem.rs
@@ -339,13 +340,15 @@ NXRS_RELAUNCH	switch	index (`NXRS_PREV_PROGRAM`); a relaunch (`param` None) pass
 NXRS_RUNTIME_LIB	switch	The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs (`gnu\libnxrt.a`).	src/cli/src/cc.rs
 NXRS_SCREEN_GRAB	switch	window's own content, through PrintWindow, whatever is in front of it. NXRS_SCREEN_GRAB=1 restores the screen copy.	src/front/src/capture.rs
 NXRS_SECONDS	test	the run ends after that many seconds (harness runs)	src/front/src/lib.rs
+NXRS_SLEEP_SPIN_US	switch	SleepThread sleeps as long as asked: the host's sleep for all but its last `NXRS_SLEEP_SPIN_US` microseconds (default 1000), then yields until the time is up (the host timer alone woke ~0.6 ms late: 20 us sleeps took 0.58 ms); `0`: the host's sleep alone	src/runtime/src/kernel.rs
 NXRS_STACK_SET	test	set by the build's compiler wrapper after raising its stack limit (internal)	src/cli/src/cc.rs
 NXRS_SWITCH2	switch	a button press wakes it toward this PC and it connects without Sync. `NXRS_SWITCH2=0` turns it off,	src/os/src/input/switch2_ble.rs
 NXRS_TICK_HZ	switch	- the system counter: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`NXRS_TICK_HZ=<Hz>` sets it);	src/runtime/src/process.rs
 NXRS_TOOLCHAIN	switch	Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when it can work here (Visual Studio installed, a clang	src/cli/src/cc.rs
 NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
-NXRS_WEB_LIB	path	The web engine library (`libnxos.a` for wasm64) a `--target web` build links: `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's `target\wasm64-unknown-emscripten\release\libnxos.a` (docs/35).	src/cli/src/cc.rs
+NXRS_WAIT_ACCT	diagnostic	`NXRS_WAIT_ACCT=1`: a `waits:` block in the log every 10 s: per guest thread its CPU share and what it blocked on (lock, condition key, address, sync handle, sleep by the time asked, blocking host function, virtual core), ms a second, and who ended each wait; host-function and SVC time beside them	src/runtime/src/waitacct.rs
+NXRS_WEB_LIB	pathThe web engine library (`libnxos.a` for wasm64) a `--target web` build links: `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's `target\wasm64-unknown-emscripten\release\libnxos.a` (docs/35).	src/cli/src/cc.rs
 NXRS_WEB_LINK_FLAGS	diagnostic	More emcc link flags for a `--target web` build (development: `-sNODERAWFS=1` runs the module under Node on the real data folder).	src/cli/src/cc.rs
 NXRS_XMON	switch- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs

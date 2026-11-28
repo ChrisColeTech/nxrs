@@ -119,6 +119,7 @@ pub fn startup(space: &Space) {
     }
     crate::profile::start(nxconfig::flag("profile"));
     crate::hostprof::start();
+    crate::waitacct::start();
     crate::rt::log(&format!(
         "program {:016x}: system tick {:.2} MHz{}; exclusive monitor {} (NXRS_XMON=1 / NXRS_NO_XMON=1); maps past the pool {}",
         p.program_id,

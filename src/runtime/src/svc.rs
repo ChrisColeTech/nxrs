@@ -80,7 +80,21 @@ fn name(imm: u32) -> &'static str {
 #[no_mangle]
 pub unsafe extern "C" fn nxrt_svc_impl(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
     note_fpcr((*c).fpcr);
-    crate::boundary::guard("rt_svc", || svc(c, imm, pc))
+    // wait accounting: an SVC's time, unless it is a kernel wait (counted by what it waits on); IPC by its session
+    let acct = (crate::waitacct::calls_on() && !matches!(imm, 0x0B | 0x18 | 0x1A | 0x1C | 0x34)).then(|| {
+        let h = if imm == 0x21 { (*c).x[0] & 0xffff_ffff } else { 0 };
+        ((imm as u64) << 32 | h, std::time::Instant::now())
+    });
+    let r = crate::boundary::guard("rt_svc", || svc(c, imm, pc));
+    if let Some((key, t0)) = acct {
+        crate::waitacct::add(
+            crate::waitacct::K_SVC,
+            key,
+            t0.elapsed().as_nanos() as u64,
+            crate::waitacct::BY_NONE,
+        );
+    }
+    r
 }
 
 /// Logs each FPCR mode (AHP, DN, FZ, RMode: bits 22-26) the first time a guest thread enters the kernel with it: the

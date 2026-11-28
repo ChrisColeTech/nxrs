@@ -1108,12 +1108,51 @@ pub fn reset_watch(a: u64, n: u64) {
 }
 
 /// Flushed by the CPU (nvnMemoryPoolFlushMappedRange): uploaded at the next submission even without a write watch.
+///
+/// The game's thread does not wait for the pool lock (OOT-WAIT: Ocarina of Time's main and job threads flush ~300
+/// times a second each and waited up to 5 ms a time behind the replay thread's pool sync, 15-37 ms a second): when
+/// the lock is held, the range is queued (`FLUSHED`) and the lock's next sync takes it (`take_flushed`) before it
+/// reads any pool's pending ranges. A flush made before a submission is queued is in the queue or the pool before that
+/// submission's sync takes the lock, so it is uploaded there as before. `NXGFX_FLUSH_QUEUE=0`: wait for the lock.
 pub fn cpu_flushed(a: u64, n: u64) {
     let Some(g) = Gpu::try_get() else { return };
-    let mut m = g.mem.lock().unwrap();
-    if let Some(b) = find(&m, a, n.max(1)) {
+    let mut m = match g.mem.try_lock() {
+        Ok(m) => m,
+        Err(std::sync::TryLockError::WouldBlock) if flush_queue_on() => {
+            FLUSHED.lock().unwrap().push((a, n));
+            FLUSHES_QUEUED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        Err(_) => g.mem.lock().unwrap(),
+    };
+    take_flushed(&mut m);
+    flushed_into(&mut m, a, n);
+}
+
+/// `NXGFX_FLUSH_QUEUE` (default on).
+fn flush_queue_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_FLUSH_QUEUE").as_deref() != Ok("0"))
+}
+
+/// CPU flushes made while the pool lock was held, for the lock's next sync (`cpu_flushed`).
+static FLUSHED: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+/// Flushes queued so far (instead of waiting for the pool lock).
+pub static FLUSHES_QUEUED: AtomicU64 = AtomicU64::new(0);
+
+/// A flushed range becomes its pool's pending upload.
+fn flushed_into(m: &mut Pools, a: u64, n: u64) {
+    if let Some(b) = find(m, a, n.max(1)) {
         m.by_base.get_mut(&b).unwrap().pending.push((a, n));
         m.busy.insert(b);
+    }
+}
+
+/// The queued flushes into their pools' pending ranges (under the pool lock, before any reads them).
+fn take_flushed(m: &mut Pools) {
+    let q = std::mem::take(&mut *FLUSHED.lock().unwrap());
+    for (a, n) in q {
+        flushed_into(m, a, n);
     }
 }
 
@@ -1169,6 +1208,7 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     };
     let frame = super::present::frames();
     let mut m = g.mem.lock().unwrap();
+    take_flushed(&mut m);
     let _watch = watch_lock(&mut m);
     let gen = m.gen;
     let Some(b) = find(&m, a, n) else { return };
@@ -3454,6 +3494,7 @@ fn seal_some(g: &Gpu) {
     let quiet = super::seal::quiet_frames();
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    take_flushed(&mut m);
     let _watch = watch_lock(&mut m);
     struct PassTimer(std::time::Instant);
     impl Drop for PassTimer {
@@ -3854,6 +3895,8 @@ pub fn begin_submit_ex(
     }
     let t_lock = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    // CPU flushes queued while the lock was held, before any pool's pending ranges are read
+    take_flushed(&mut m);
     // the walker's pages first, and none taken by it while this sync scans and uploads
     let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -4944,6 +4987,10 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &super::upskip::report(f)
         + &super::wbdiff::report(f)
         + &web_summary(f)
+        + &format!(
+            "; CPU flushes queued instead of waiting for the pool lock: {:.1} a frame",
+            FLUSHES_QUEUED.swap(0, Ordering::Relaxed) as f64 / f
+        )
 }
 
 /// (web) What the compare by use read a frame, and its time.
@@ -5221,6 +5268,22 @@ mod seal_tests {
             m.by_base.insert(b, pool(b, n));
         }
         m
+    }
+
+    /// OOT-WAIT: a CPU flush queued while the pool lock was held becomes its pool's pending upload (and the pool busy)
+    /// at the lock's next take, as a flush made under the lock does; a range in no pool is dropped, the queue emptied.
+    #[test]
+    fn queued_flushes_become_pending_at_the_next_lock() {
+        let p = PAGE;
+        let mut m = pools(&[(0, 4 * p), (100 * p, 2 * p)]);
+        FLUSHED.lock().unwrap().extend([(p, 64), (100 * p + 8, 16), (900 * p, 8)]);
+        take_flushed(&mut m);
+        assert!(FLUSHED.lock().unwrap().is_empty());
+        assert_eq!(m.by_base[&0].pending, vec![(p, 64)]);
+        assert_eq!(m.by_base[&(100 * p)].pending, vec![(100 * p + 8, 16)]);
+        assert!(m.busy.contains(&0) && m.busy.contains(&(100 * p)));
+        flushed_into(&mut m, 2 * p, 4);
+        assert_eq!(m.by_base[&0].pending, vec![(p, 64), (2 * p, 4)], "a flush under the lock: the same");
     }
 
     /// The walker's pages go to every watched pool holding them, nested ones too, with the watched list kept between
