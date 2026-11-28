@@ -106,7 +106,7 @@ pub unsafe extern "C" fn nxrt_host_invoke(c: *mut Cpu) -> u32 {
         crate::hostfn::count_call(pc);
         PENDING.set(0);
         let sc = crate::kernel::sched();
-        let t0 = crate::waitacct::on().then(std::time::Instant::now);
+        let t0 = crate::waitacct::calls_on().then(std::time::Instant::now);
         sc.host_enter();
         f(c);
         sc.host_leave();

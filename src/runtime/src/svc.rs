@@ -81,7 +81,7 @@ fn name(imm: u32) -> &'static str {
 pub unsafe extern "C" fn nxrt_svc_impl(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
     note_fpcr((*c).fpcr);
     // wait accounting: an SVC's time, unless it is a kernel wait (counted by what it waits on); IPC by its session
-    let acct = (crate::waitacct::on() && !matches!(imm, 0x0B | 0x18 | 0x1A | 0x1C | 0x34)).then(|| {
+    let acct = (crate::waitacct::calls_on() && !matches!(imm, 0x0B | 0x18 | 0x1A | 0x1C | 0x34)).then(|| {
         let h = if imm == 0x21 { (*c).x[0] & 0xffff_ffff } else { 0 };
         ((imm as u64) << 32 | h, std::time::Instant::now())
     });

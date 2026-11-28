@@ -5,8 +5,9 @@
 //! (fence, present and queue waits, services that block: the os layer's `without_core`, keyed by the host function
 //! the thread is in) and the wait for a virtual core. Each entry keeps its count, total and longest time, and the
 //! time by who ended it: the guest thread that unlocked, signalled or woke it, a host thread (by name), or nobody (a
-//! timeout). Beside the waits, the wall time inside each host function (`call`) and each SVC that is not a kernel wait
-//! (`svc`, IPC by session handle) is kept the same way, outside the waits' sum (it includes their own blocking waits).
+//! timeout). With `NXRS_WAIT_ACCT=2`, beside the waits, the wall time inside each host function (`call`) and each SVC
+//! that is not a kernel wait (`svc`, IPC by session handle) is kept the same way, outside the waits' sum (it includes
+//! their own blocking waits).
 //! A `waits:` block goes to the log every 10 s: per thread its CPU share (from the OS), its entry function,
 //! the time it was neither running nor in a counted wait, and its top waits in ms a second with their wakers. That is
 //! the chain: what a thread waits on, who ends that wait, and what that thread waits on in turn.
@@ -47,6 +48,13 @@ const PERIOD: Duration = Duration::from_secs(10);
 pub fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("NXRS_WAIT_ACCT").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Whether host-function and SVC time are kept too (`NXRS_WAIT_ACCT=2`): one table update per host call, tens of
+/// thousands a second across the job threads (it slowed Ocarina of Time's frame, so it is not part of `1`).
+pub fn calls_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| on() && std::env::var("NXRS_WAIT_ACCT").is_ok_and(|v| v.trim() == "2"))
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
