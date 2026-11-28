@@ -298,16 +298,22 @@ pub fn upload_changed(
                 }
             }
             // 2. the guest bytes of the pages that may be left out, hashed with the lock released
-            for c in cand.iter_mut().filter(|c| c.h != 0 || c.br != 0) {
-                c.gh = match pre.get(((c.pg - first_pg) / PAGE) as usize) {
-                    Some(&h) if h != 0 => h,
-                    // (a whole page only: `prehash` hashed whole pages)
-                    _ => match if c.whole { prehashed(c.pg) } else { 0 } {
-                        0 => page_hash(guest(c.s, c.t)),
-                        h => h,
-                    },
-                };
-            }
+            // (`prehash`'s pages are found by one search a batch and a walk along them: the batch's pages ascend; a search
+            // a page was ~0.8 % of the replay thread in OoT, ~14,000 pages a frame)
+            PRE.with(|l| {
+                let l = l.borrow();
+                let mut k = l.partition_point(|e| e.0 < pg);
+                for c in cand.iter_mut().filter(|c| c.h != 0 || c.br != 0) {
+                    c.gh = match pre.get(((c.pg - first_pg) / PAGE) as usize) {
+                        Some(&h) if h != 0 => h,
+                        // (a whole page only: `prehash` hashed whole pages)
+                        _ => match if c.whole { prehashed_at(&l, &mut k, c.pg) } else { 0 } {
+                            0 => page_hash(guest(c.s, c.t)),
+                            h => h,
+                        },
+                    };
+                }
+            });
             // 3. left out where the page still is as step 1 found it and the guest bytes match; else marked for upload
             {
                 let mut g = state();
@@ -438,12 +444,16 @@ pub fn prehash_clear() {
     PRE.with(|p| p.borrow_mut().clear());
 }
 
-/// The hash `prehash` took of page `pg` in this sync (0: none).
-fn prehashed(pg: u64) -> u64 {
-    PRE.with(|p| {
-        let p = p.borrow();
-        p.binary_search_by_key(&pg, |e| e.0).map(|i| p[i].1).unwrap_or(0)
-    })
+/// The hash `prehash` took of page `pg` in this sync (0: none), from `l` (its ascending list) at or after `*k`, which
+/// moves to the first entry not below `pg`: called for ascending pages, the walk along `l` is one pass.
+fn prehashed_at(l: &[(u64, u64)], k: &mut usize, pg: u64) -> u64 {
+    while *k < l.len() && l[*k].0 < pg {
+        *k += 1;
+    }
+    match l.get(*k) {
+        Some(&(p, h)) if p == pg => h,
+        _ => 0,
+    }
 }
 
 fn prehash_on() -> bool {
@@ -1509,8 +1519,22 @@ mod tests {
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "decided on the prehash");
         prehash_clear();
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![(base + PAGE, PAGE)], "the next sync: its own hash");
-        assert_eq!(prehashed(base), 0, "cleared");
+        assert_eq!(PRE.with(|l| prehashed_at(&l.borrow(), &mut 0, base)), 0, "cleared");
         drop_any(base);
+    }
+
+    /// OOT-FPS2: the walk along `prehash`'s list finds each page's hash for ascending pages, 0 for pages it lacks, and
+    /// never looks back (a page asked below the cursor is not found: callers ask in ascending order).
+    #[test]
+    fn prehashed_pages_are_found_by_one_walk_for_ascending_pages() {
+        let l = [(0x1000, 11), (0x3000, 33), (0x4000, 44), (0x9000, 99)];
+        let mut k = l.partition_point(|e| e.0 < 0x1000);
+        let got: Vec<u64> =
+            [0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x9000, 0xa000].iter().map(|&p| prehashed_at(&l, &mut k, p)).collect();
+        assert_eq!(got, vec![11, 0, 33, 44, 0, 99, 0]);
+        let mut k = l.partition_point(|e| e.0 < 0x4000);
+        assert_eq!(k, 2, "a batch starting at 0x4000 starts at its entry");
+        assert_eq!(prehashed_at(&l, &mut k, 0x4000), 44);
     }
 
     /// OOT-DESC: a landing whose pages were compared and hashed before the pool lock (`landing_pre`) leaves the same

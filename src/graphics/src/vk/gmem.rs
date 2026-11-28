@@ -163,6 +163,23 @@ fn encode(gen: u64, windows: &[(u64, u64, u64)]) -> (Table, usize) {
     )
 }
 
+/// `POOL_GEN` after the last walk of `bindings` that left nothing for later (0: none yet); tables made while it stands
+/// skip the walks. Tables that skipped them (the pool table's line).
+static WALKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static WALKS_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TABLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a table at pool generation `gen` walks the pools, the last clean walk having left `walked` (0: none).
+fn walk_due(walked: u64, gen: u64) -> bool {
+    walked == 0 || walked != gen
+}
+
+/// `NXGFX_GMEM_WALK_SKIP=0`: every table walks the pools, as before OOT-FPS2.
+fn walk_skip_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_GMEM_WALK_SKIP").as_deref() != Ok("0"))
+}
+
 /// Pools given a buffer only to be listed in the table (`bindings`).
 static BACKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -232,9 +249,29 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
         end(g, sub);
     }
     if sub.gmem.is_none() {
+        // (OOT-FPS2) the walks below look at what only a pool made, gone or given its buffer, or a CPU write deferred,
+        // can change, and each of those moves `POOL_GEN` (under the pool lock): after a walk that left nothing for
+        // later, the next tables of the same generation have nothing to walk and do not take the pool lock (OoT:
+        // ~4,500 pools walked three times under it at every submission and lane segment, the replay thread waiting
+        // for the lanes' walks). A generation moved by a change in progress elsewhere is seen by the next table, as a
+        // table made just before that change.
+        let gen_now = super::mem::POOL_GEN.load(Ordering::Acquire);
+        let walk = !walk_skip_on() || walk_due(WALKED.load(Ordering::Acquire), gen_now);
+        let tables = TABLES.fetch_add(1, Ordering::Relaxed) + 1;
+        if tables % 20_000 == 0 {
+            crate::vklog!(
+                "raw global memory: {tables} pool tables, {} of them without walking the pools (NXGFX_GMEM_WALK_SKIP)",
+                WALKS_SKIPPED.load(Ordering::Relaxed)
+            );
+        }
         // a shader may reach any byte of a listed pool: pools backed in granules are bound whole first
-        {
+        'walk: {
+            if !walk {
+                WALKS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+                break 'walk;
+            }
             let mut m = g.mem.lock().unwrap();
+            let mut clean = true;
             // and every pool the GPU may reach is listed, which needs its buffer: a pool no binding ever named had
             // none, so it was not in the table and a load through a pointer into it read 0 (OOT-FIX: Ocarina of
             // Time's light-probe data, read by agl's scene analysis 6e28359aa3558f61 through pointers in a storage
@@ -268,11 +305,14 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
                         && p.placement != super::mem::Placement::CpuOnly
                 }) {
                     if budget == 0 {
+                        // pools left for the next tables
+                        clean = false;
                         break;
                     }
                     let size = p.size;
                     if let Err(e) = p.ensure_buffer(g, sub) {
                         crate::log::red_once(&format!("raw global memory: {e}"));
+                        clean = false;
                         continue;
                     }
                     // a pool backed in granules gets memory only where the guest's memory is committed (the rest is
@@ -294,6 +334,7 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
                         for (a, n) in super::mem::committed(p.base, p.size) {
                             if let Err(e) = p.bind(g, sub, a, n) {
                                 crate::log::red_once(&format!("raw global memory: {e}"));
+                                clean = false;
                                 break;
                             }
                         }
@@ -329,6 +370,10 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
             // and every CPU write the upload budget left for later goes now
             for p in m.by_base.values_mut().filter(|p| !p.deferred.is_empty()) {
                 p.upload_deferred(g, sub, 0, u64::MAX);
+            }
+            // (the generation as the walk left it: buffers it made moved it, under this lock)
+            if clean {
+                WALKED.store(super::mem::POOL_GEN.load(Ordering::Acquire), Ordering::Release);
             }
         }
         let (bytes, ranges, identities, generation) = {
@@ -1230,6 +1275,15 @@ mod tests {
         assert!(super::super::mem::writeback_identity_matches(Some(7), 7));
         assert_eq!(super::super::mem::merge_changed_bytes(&mut guest, &result, &baseline), 1);
         assert_eq!(guest, [1, 9]);
+    }
+
+    /// OOT-FPS2: a table walks the pools until a walk left nothing for later at the generation it stands at; a pool
+    /// made, gone or given its buffer, or a deferred CPU write (each moves the generation) makes the next one walk.
+    #[test]
+    fn tables_walk_the_pools_only_when_the_generation_moved_since_a_clean_walk() {
+        assert!(walk_due(0, 1), "no clean walk yet");
+        assert!(!walk_due(7, 7), "nothing changed since the clean walk at 7");
+        assert!(walk_due(7, 8), "the generation moved");
     }
 
     /// OOT-FIX: word 7 of an entry is its span (the translator's last-entry check), 0 across a 4 GiB boundary.
