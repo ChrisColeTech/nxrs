@@ -148,8 +148,13 @@ struct Inflight {
     value: u64,
     sub: Sub,
     wb: Vec<(u64, u64, u64, *const u8, *const u8, u64)>,
+    /// per write-back: its landing flags when the GPU compared it (`wbdiff`), else null
+    wbf: Vec<*const u32>,
     readback: Option<Buf>,
     before: Option<Buf>,
+    /// the GPU compare's device baselines and host flags (`wbdiff`)
+    dbase: Option<Buf>,
+    flags: Option<Buf>,
     /// the recording epoch its GPU-write notes stamped (`upskip`)
     epoch: u64,
 }
@@ -945,13 +950,17 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         std::mem::swap(&mut s.pre, &mut l.pre);
         std::mem::swap(&mut s.main, &mut l.main);
     }
-    super::gmem::end(g, &mut s);
+    super::gmem::end_submit(g, &mut s);
     // write-backs: copy the GPU-written ranges into one readback buffer at the end of the replay
     exec::seg_stats::WB_RANGES.fetch_add(s.writebacks.len() as u64, Ordering::Relaxed);
     let total: u64 = s.writebacks.iter().map(|w| (w.2 + 15) & !15).sum();
     let mut readback = None;
     let mut before: Option<Buf> = None;
     let mut wb = Vec::new();
+    // per write-back: its first landing flag when the GPU compared it (`wbdiff`), else null
+    let mut wbf: Vec<*const u32> = Vec::new();
+    let mut dbase: Option<Buf> = None;
+    let mut flags: Option<Buf> = None;
     if total > 0 {
         barrier_all(g, s.main);
         let rb = wb_bufs::take(g, total, "write-back").expect("readback");
@@ -963,24 +972,80 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         if bf.is_some() {
             barrier_all(g, s.pre);
         }
+        // ranges the GPU compares (`wbdiff`): their baselines go to a device buffer and only the pages the GPU changed
+        // come back to `rb` / `bf`; the rest are copied back whole as before
+        let kernel = if super::wbdiff::on() && bf.as_ref().is_some_and(|b| b.addr != 0) && rb.addr != 0 {
+            super::wbdiff::pipe(g)
+        } else {
+            None
+        };
+        let fits: Vec<bool> = s
+            .writebacks
+            .iter()
+            .map(|w| kernel.is_some() && super::wbdiff::fits(w.1, w.2, w.4))
+            .collect();
+        let nflags: u64 = s
+            .writebacks
+            .iter()
+            .zip(&fits)
+            .filter(|(_, &f)| f)
+            .map(|(w, _)| super::wbdiff::chunks(w.1, w.2))
+            .sum();
+        if nflags > 0 {
+            dbase = super::wbdiff::take(g, total);
+            if dbase.is_some() {
+                flags = wb_bufs::take(g, nflags * 4, "write-back flags").ok().filter(|f| f.addr != 0);
+            }
+        }
+        let diff = dbase.is_some() && flags.is_some();
+        if !diff {
+            if let Some(b) = dbase.take() {
+                super::wbdiff::give(g, b);
+            }
+            if let Some(b) = flags.take() {
+                wb_bufs::give(g, b);
+            }
+        }
+        let mut jobs: Vec<super::wbdiff::Job> = Vec::new();
+        let mut foff = 0u64;
         let mut off = 0;
         super::lost::checkpoint(g, s.main, false, || {
             format!("the write-back copies of {} range(s)", s.writebacks.len())
         });
-        for &(pool, a, n, buf, boff, identity) in &s.writebacks {
+        for (i, &(pool, a, n, buf, boff, identity)) in s.writebacks.iter().enumerate() {
             let r = [vk::BufferCopy {
                 src_offset: boff,
                 dst_offset: off,
                 size: n,
             }];
-            record_writeback_pair(bf.is_some(), |copy| match copy {
-                WritebackCopy::Result => unsafe { g.dev().cmd_copy_buffer(s.main, buf, rb.buf, &r) },
-                WritebackCopy::Baseline => {
-                    if let Some(b) = &bf {
-                        unsafe { g.dev().cmd_copy_buffer(s.pre, buf, b.buf, &r) };
+            if diff && fits[i] {
+                let (db, fl, bfb) = (dbase.as_ref().unwrap(), flags.as_ref().unwrap(), bf.as_ref().unwrap());
+                unsafe { g.dev().cmd_copy_buffer(s.pre, buf, db.buf, &r) };
+                let src = unsafe {
+                    g.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf))
+                };
+                jobs.push(super::wbdiff::Job {
+                    src: src + boff,
+                    base: db.addr + off,
+                    rb: rb.addr + off,
+                    bf: bfb.addr + off,
+                    flags: fl.addr + foff,
+                    n,
+                    a,
+                });
+                wbf.push(unsafe { fl.ptr.add(foff as usize) } as *const u32);
+                foff += super::wbdiff::chunks(a, n) * 4;
+            } else {
+                record_writeback_pair(bf.is_some(), |copy| match copy {
+                    WritebackCopy::Result => unsafe { g.dev().cmd_copy_buffer(s.main, buf, rb.buf, &r) },
+                    WritebackCopy::Baseline => {
+                        if let Some(b) = &bf {
+                            unsafe { g.dev().cmd_copy_buffer(s.pre, buf, b.buf, &r) };
+                        }
                     }
-                }
-            });
+                });
+                wbf.push(core::ptr::null());
+            }
             let base = bf.as_ref().map_or(core::ptr::null(), |b| unsafe {
                 b.ptr.add(off as usize) as *const u8
             });
@@ -993,6 +1058,9 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
                 identity,
             ));
             off += (n + 15) & !15;
+        }
+        if let Some((layout, pipe)) = kernel.filter(|_| !jobs.is_empty()) {
+            super::wbdiff::record(g, s.main, layout, pipe, &jobs);
         }
         readback = Some(rb);
         before = bf;
@@ -1139,8 +1207,11 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             value,
             sub: s,
             wb,
+            wbf,
             readback,
             before,
+            dbase,
+            flags,
             epoch,
         });
         q.inflight_cv.notify_one();
@@ -1152,8 +1223,11 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         value,
         sub: s,
         wb,
+        wbf,
         readback,
         before,
+        dbase,
+        flags,
         epoch,
     });
     q.inflight_cv.notify_one();
@@ -1165,7 +1239,8 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
 /// block of host memory from the driver (`vkAllocateMemory`, ~15 % of Ocarina of Time's replay thread, and its
 /// `vkFreeMemory` ~6 % of the completion thread's). A kept buffer is handed out again only after the completion of the
 /// submission that used it has landed its write-backs (`give` runs after `apply_writebacks`), and a submission writes
-/// every byte of the ranges it reads back (`submit_sub`). `NXGFX_WB_RECYCLE=0`: made and freed each time, as before.
+/// every byte of the ranges it reads back (`submit_sub`), except the pages a GPU compare flags unchanged, which its
+/// landing never reads (`wbdiff`). `NXGFX_WB_RECYCLE=0`: made and freed each time, as before.
 pub(crate) mod wb_bufs {
     use super::{Buf, Gpu};
     use ash::vk;
@@ -1240,17 +1315,19 @@ pub(crate) mod wb_bufs {
     pub(crate) static MADE: AtomicU64 = AtomicU64::new(0);
     pub(crate) static REUSED: AtomicU64 = AtomicU64::new(0);
 
-    /// A mapped host buffer of at least `n` bytes for a submission's write-back copies.
+    /// A mapped host buffer of at least `n` bytes for a submission's write-back copies. Storage usage gives it a device
+    /// address: the GPU compare (`wbdiff`) writes the pages it copies back through it.
     pub(crate) fn take(g: &Gpu, n: u64, name: &str) -> Result<Buf, String> {
+        let usage = vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER;
         if !on() {
-            return g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name);
+            return g.buffer(n, usage, MemoryLocation::GpuToCpu, name);
         }
         if let Some(b) = SHELF.lock().unwrap().take(n) {
             REUSED.fetch_add(1, Ordering::Relaxed);
             return Ok(b);
         }
         MADE.fetch_add(1, Ordering::Relaxed);
-        g.buffer(class(n), vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name)
+        g.buffer(class(n), usage, MemoryLocation::GpuToCpu, name)
     }
 
     /// A completed submission's write-back buffer: kept for the next ones (or freed past the cap, or with the switch off).
@@ -1260,7 +1337,11 @@ pub(crate) mod wb_bufs {
             return;
         }
         let size = b.size;
-        let back = SHELF.lock().unwrap().put(size, b, KEEP, PER_SIZE);
+        // small buffers (the raw write logs' copies and the GPU compare's flags: one or more a submission and segment)
+        // are kept up to 16 MB of a size, more than `PER_SIZE` of them (OOT-FPS: at 64 the 64 KiB ones were made
+        // again ~7 times a second in Ocarina of Time's walk)
+        let per_size = PER_SIZE.max(((16u64 << 20) / size.max(1)) as usize);
+        let back = SHELF.lock().unwrap().put(size, b, KEEP, per_size);
         if let Some(b) = back {
             g.free_buffer(b);
         }
@@ -1377,7 +1458,7 @@ fn completion_loop(g: &'static Gpu) {
         }
         // CPU-visible effects, in order: write-backs first (an event may tell the game to read them)
         wait_diag::mark(2, "CPU writebacks", [item.value, 0]);
-        super::mem::apply_writebacks(g, &item.wb, item.epoch, item.value);
+        super::mem::apply_writebacks(g, &item.wb, &item.wbf, item.epoch, item.value);
         wait_diag::mark(2, "queries/post effects", [item.value, 0]);
         let mut sub = item.sub;
         if super::exec::db_poison_on() {
@@ -1457,6 +1538,12 @@ fn completion_loop(g: &'static Gpu) {
         }
         if let Some(b) = item.before {
             wb_bufs::give(g, b);
+        }
+        if let Some(b) = item.flags {
+            wb_bufs::give(g, b);
+        }
+        if let Some(b) = item.dbase {
+            super::wbdiff::give(g, b);
         }
         for b in sub.transient.drain(..) {
             g.free_buffer(b);

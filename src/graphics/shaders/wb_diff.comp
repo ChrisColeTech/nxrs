@@ -1,0 +1,46 @@
+#version 460
+// A write-back's range compared on the GPU (`queue::submit_sub`): the range as the submission left it (`src`, the
+// pool's buffer) against the same range before the submission's work (`base`, a device copy made in `pre`), one
+// workgroup per chunk. A chunk is the part of one guest page inside the range: chunk 0 starts at the range's start
+// (`head` bytes into its page), the others at page starts. Only chunks the GPU changed, and every partial chunk (the
+// range's first and last when they are not whole pages), are copied to the host buffers (`rb` the GPU's bytes, `bf`
+// the baseline, at their offset in the range); `flags[k]` = 1: a whole page the GPU left as it was (nothing copied),
+// 2: copied. Byte addresses and `n` are multiples of 4.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 256) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 src; uvec2 base; uvec2 rb; uvec2 bf; uvec2 flags; uint n; uint head; } p;
+shared uint diff;
+void main() {
+    uint k = gl_WorkGroupID.x;
+    uint lo = k == 0u ? 0u : k * 4096u - p.head;
+    uint hi = min((k + 1u) * 4096u - p.head, p.n);
+    uint t = gl_LocalInvocationIndex;
+    if (t == 0u) {
+        diff = 0u;
+    }
+    barrier();
+    W s = W(p.src);
+    W b = W(p.base);
+    uint d = 0u;
+    for (uint o = lo / 4u + t; o < hi / 4u; o += 256u) {
+        d |= s.v[o] ^ b.v[o];
+    }
+    if (d != 0u) {
+        atomicOr(diff, 1u);
+    }
+    barrier();
+    bool copy = diff != 0u || hi - lo != 4096u;
+    if (copy) {
+        W r = W(p.rb);
+        W f = W(p.bf);
+        for (uint o = lo / 4u + t; o < hi / 4u; o += 256u) {
+            r.v[o] = s.v[o];
+            f.v[o] = b.v[o];
+        }
+    }
+    if (t == 0u) {
+        W(p.flags).v[k] = copy ? 2u : 1u;
+    }
+}

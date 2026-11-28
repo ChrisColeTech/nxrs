@@ -4463,28 +4463,65 @@ fn land_skip_same_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_LAND_SKIP_SAME").as_deref() != Ok("0"))
 }
 
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
+/// `flags`: per write-back, its landing flags when the GPU compared it (`wbdiff`: the bytes of pages it left as they
+/// were are not in `src` / `base`, so those pages are handed to the landing as unchanged whatever the switches say),
+/// else null.
+pub fn apply_writebacks(
+    g: &Gpu,
+    wbs: &[(u64, u64, u64, *const u8, *const u8, u64)],
+    flags: &[*const u32],
+    epoch: u64,
+    value: u64,
+) {
     if wbs.is_empty() {
         return;
     }
     let landed: Vec<(u64, u64)> = wbs.iter().map(|w| (w.1, w.2)).collect();
     let _done = InflightDone(landed);
+    let flag = |i: usize| flags.get(i).copied().unwrap_or(core::ptr::null());
+    let gpu_diff = flags.iter().any(|f| !f.is_null());
     // each write-back's pages compared with its baseline and hashed before the pool lock is taken (OOT-DESC: that work
     // under the lock held up the replay thread's syncs and lookups); it reads only the write-back's own buffers.
-    // `NXGFX_LAND_PRE=0`: done under the lock, as before
-    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
-        wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    // `NXGFX_LAND_PRE=0`: done under the lock, as before. A range the GPU compared takes its answer from its flags.
+    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() || gpu_diff {
+        wbs.iter()
+            .enumerate()
+            .map(|(i, w)| {
+                if !flag(i).is_null() {
+                    super::upskip::landing_pre_flags(w.1, w.2, w.3, flag(i))
+                } else if land_pre_on() {
+                    super::upskip::landing_pre(w.1, w.2, w.3, w.4)
+                } else {
+                    None
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
     // (OOT-MEM) every whole page the GPU left as the baseline has it, not only the re-armed ones: `land_changed`
     // compared each such page again under the pool lock (OoT: ~48 MB a frame, ~3 ms of the lock the replay thread's
     // syncs wait for) to find it writes nothing. `NXGFX_LAND_SKIP_SAME=0`: only the re-armed pages, as before
-    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() {
-        pres.iter().map(|p| p.as_ref().map(|p| p.same_pages()).unwrap_or_default()).collect()
+    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() || gpu_diff {
+        pres.iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if land_skip_same_on() || !flag(i).is_null() {
+                    p.as_ref().map(|p| p.same_pages()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };
+    // the pages each write-back may hand to the device (`lazy::take_lazy`: its streaks and held pages, the lazy state's
+    // own lock) chosen before the pool lock (OOT-FPS: ~1.2 ms a frame under it, every page of ~67 MB of ranges); used
+    // below for the write-backs of watched pools only
+    let tl = std::time::Instant::now();
+    let mut lazies: Vec<Vec<u64>> = wbs.iter().map(|w| super::lazy::take_lazy(w.1, w.2)).collect();
+    super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
@@ -4530,7 +4567,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
-            super::lazy::take_lazy(a, n)
+            lazies.get_mut(i).map(std::mem::take).unwrap_or_default()
         } else {
             vec![]
         };
@@ -4684,9 +4721,38 @@ pub(crate) fn merge_changed_bytes(guest: &mut [u8], after: &[u8], before: &[u8])
     assert_eq!(guest.len(), after.len());
     assert_eq!(after.len(), before.len());
     let mut kept = 0;
-    for ((guest, &new), &old) in guest.iter_mut().zip(after).zip(before) {
-        if new != old { *guest = new; }
-        else if *guest != old { kept += 1; }
+    // eight bytes at a time where the producer changed none of them and the guest still has the baseline (most of a
+    // changed page: OOT-FPS, this loop byte by byte was ~2.7 ms a frame of the completion thread under the pool lock);
+    // any other word byte by byte as before (only changed bytes are stored: a CPU store beside them in the same word is
+    // never overwritten)
+    let word = |s: &[u8], i: usize| u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+    // 0x80 in each byte of `x` that is not zero
+    let nz = |x: u64| ((x & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f) | x) & 0x8080_8080_8080_8080;
+    let n = guest.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let (a, b, gw) = (word(after, i), word(before, i), word(guest, i));
+        let ch = nz(a ^ b);
+        // bytes the producer left alone that the CPU has changed: kept
+        kept += (nz(gw ^ b) & !ch).count_ones() as u64;
+        if ch == 0x8080_8080_8080_8080 {
+            guest[i..i + 8].copy_from_slice(&after[i..i + 8]);
+        } else if ch != 0 {
+            for k in 0..8 {
+                if ch & (0x80 << (8 * k)) != 0 {
+                    guest[i + k] = after[i + k];
+                }
+            }
+        }
+        i += 8;
+    }
+    for k in i..n {
+        let (new, old) = (after[k], before[k]);
+        if new != old {
+            guest[k] = new;
+        } else if guest[k] != old {
+            kept += 1;
+        }
     }
     kept
 }
@@ -4698,38 +4764,133 @@ fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8, s
             core::slice::from_raw_parts(base, n as usize),
         )
     };
-    let mut at = 0u64;
+    // the pages (offsets [lo, hi) in the range) the GPU changed, found first; then landed in runs of adjacent pages, each
+    // run with one write-watch take and one reset (OOT-FPS: one of each per page was ~4.5 ms a frame of the completion
+    // thread under the pool lock for OoT's ~560 changed pages a frame, two system calls a page)
+    let changed = changed_pages(a, n, s, b, same);
     let mut kept = 0u64;
+    let mut i = 0;
+    while i < changed.len() {
+        let mut j = i + 1;
+        while j < changed.len() && changed[j].0 == changed[j - 1].1 && j - i < LAND_RUN {
+            j += 1;
+        }
+        let (rlo, rhi) = (changed[i].0, changed[j - 1].1);
+        super::lazy::touch(a + rlo, rhi - rlo);
+        let (plo, phi) = page_range(a + rlo, rhi - rlo);
+        if p.watched {
+            if let Some(pages) = watch::take(plo, phi, true) {
+                for pg in pages {
+                    p.pending.push((pg, PAGE));
+                }
+            }
+        }
+        for &(lo, hi) in &changed[i..j] {
+            let (lo, hi) = (lo as usize, hi as usize);
+            let g = unsafe { core::slice::from_raw_parts_mut((a + lo as u64) as *mut u8, hi - lo) };
+            kept += merge_changed_bytes(g, &s[lo..hi], &b[lo..hi]);
+            if !p.watched {
+                if let Some(snap) = p.snapshot.as_mut() {
+                    let o = (a + lo as u64 - p.base) as usize;
+                    snap[o..o + (hi - lo)].copy_from_slice(&g[..]);
+                }
+            }
+        }
+        if p.watched {
+            watch::reset(plo, phi);
+        }
+        WRITEBACK_BYTES.fetch_add(rhi - rlo, Ordering::Relaxed);
+        i = j;
+    }
+    if kept > 0 {
+        WRITEBACK_KEPT.fetch_add(kept, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod changed_pages_tests {
+    use super::{changed_pages, PAGE};
+
+    /// OOT-FPS: the pieces a landing writes are the pages (partial at the ends) whose bytes differ, one per page and
+    /// adjacent where the pages are, and a page known unchanged is not compared (its bytes may be garbage: `wbdiff`).
+    #[test]
+    fn changed_pages_are_the_differing_pages_in_order() {
+        let a = 0x1000_0000u64 + 100;
+        let n = 6 * PAGE - 200;
+        let b = vec![5u8; n as usize];
+        let mut s = b.clone();
+        for p in [0u64, 2, 3, 5] {
+            s[(p * PAGE).saturating_sub(100) as usize] ^= 1;
+        }
+        // page 4 garbage but known unchanged
+        let p4 = (4 * PAGE - 100) as usize;
+        s[p4..p4 + 8].copy_from_slice(&[9; 8]);
+        let lo = |p: u64| (p * PAGE).saturating_sub(100);
+        let got = changed_pages(a, n, &s, &b, &[0x1000_0000 + 4 * PAGE]);
+        assert_eq!(got, vec![(0, lo(1)), (lo(2), lo(3)), (lo(3), lo(4)), (lo(5), n)]);
+    }
+
+    /// OOT-FPS: the word-at-a-time merge gives the guest bytes and the kept count of the byte-by-byte one, over
+    /// lengths that end mid-word and producer, CPU and both changes in the same words.
+    #[test]
+    fn the_word_merge_is_the_byte_merge() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for len in [0usize, 1, 7, 8, 9, 63, 4096, 4099] {
+            for _ in 0..20 {
+                let before: Vec<u8> = (0..len).map(|_| rnd() as u8 & 3).collect();
+                let mut after = before.clone();
+                let mut guest = before.clone();
+                for k in 0..len {
+                    let r = rnd();
+                    if r % 7 == 0 {
+                        after[k] ^= 1 + (r >> 8) as u8 % 3;
+                    }
+                    if r % 11 == 0 {
+                        guest[k] ^= 4;
+                    }
+                }
+                let mut want = guest.clone();
+                let mut kept = 0;
+                for k in 0..len {
+                    if after[k] != before[k] {
+                        want[k] = after[k];
+                    } else if want[k] != before[k] {
+                        kept += 1;
+                    }
+                }
+                assert_eq!(super::merge_changed_bytes(&mut guest, &after, &before), kept, "len {len}");
+                assert_eq!(guest, want, "len {len}");
+            }
+        }
+    }
+}
+
+/// Changed pages landed with one write-watch take and reset at most (a run is short: a CPU store to a page of it
+/// between the take and the reset is lost to the watch, as one to a single page between its take and reset was).
+const LAND_RUN: usize = 16;
+
+/// The pieces of the write-back of [a, a + n) (offsets from `a`, one per guest page) whose GPU bytes `s` differ from
+/// the baseline `b`, ascending; whole pages in `same` (known unchanged) are not compared.
+fn changed_pages(a: u64, n: u64, s: &[u8], b: &[u8], same: &[u64]) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    let mut at = 0u64;
     while at < n {
         let pg_end = (((a + at) / PAGE + 1) * PAGE - a).min(n);
         let (lo, hi) = (at as usize, pg_end as usize);
         // a whole page the upload skip's re-arm already compared and found unchanged (`upskip::landed`)
         let known_same = pg_end - at == PAGE && same.binary_search(&(a + at)).is_ok();
         if !known_same && s[lo..hi] != b[lo..hi] {
-            super::lazy::touch(a + at, pg_end - at);
-            let (plo, phi) = page_range(a + at, pg_end - at);
-            if p.watched {
-                if let Some(pages) = watch::take(plo, phi, true) {
-                    for pg in pages {
-                        p.pending.push((pg, PAGE));
-                    }
-                }
-            }
-            let g = unsafe { core::slice::from_raw_parts_mut((a + at) as *mut u8, hi - lo) };
-            kept += merge_changed_bytes(g, &s[lo..hi], &b[lo..hi]);
-            if p.watched {
-                watch::reset(plo, phi);
-            } else if let Some(snap) = p.snapshot.as_mut() {
-                let o = (a + at - p.base) as usize;
-                snap[o..o + (hi - lo)].copy_from_slice(&g[..]);
-            }
-            WRITEBACK_BYTES.fetch_add(pg_end - at, Ordering::Relaxed);
+            out.push((at, pg_end));
         }
         at = pg_end;
     }
-    if kept > 0 {
-        WRITEBACK_KEPT.fetch_add(kept, Ordering::Relaxed);
-    }
+    out
 }
 
 /// One line of placement and traffic (with the pacing line).
@@ -4781,6 +4942,7 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &super::lazy::summary(f)
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
+        + &super::wbdiff::report(f)
         + &web_summary(f)
 }
 

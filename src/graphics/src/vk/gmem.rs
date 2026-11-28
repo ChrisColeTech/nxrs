@@ -386,7 +386,25 @@ fn logged_ranges(log: &[u32], ranges: &[(u64, u64)], identities: &[u64]) -> Vec<
 }
 
 /// At the end of a recording: the log is read at its completion (the pools it names are written back next).
+/// (Mid-recording, a table replaced: the log is read where the shaders wrote it.)
 pub fn end(g: &Gpu, sub: &mut Sub) {
+    end_with(g, sub, false)
+}
+
+/// At submission, outside any pass: as `end`, the log first copied by the GPU into host-cached memory (OOT-FPS: the
+/// staging buffer the shaders write it in is device memory the CPU reads across the bus; reading its 256 words twice,
+/// word by word, was ~5 ms a frame of the completion thread in Ocarina of Time, 11 submissions a frame, before the
+/// write-backs land and the game's events are published).
+pub fn end_submit(g: &Gpu, sub: &mut Sub) {
+    end_with(g, sub, true)
+}
+
+/// A host buffer a completion closure gives back (`Post::Early` closures are `Send`; the buffer is only read there).
+struct LogCopy(super::Buf);
+// SAFETY: the buffer's mapping is read only by the one closure that owns it, after its submission completed
+unsafe impl Send for LogCopy {}
+
+fn end_with(g: &Gpu, sub: &mut Sub, copy: bool) {
     let Some(version) = sub.gmem.take() else {
         return;
     };
@@ -401,12 +419,29 @@ pub fn end(g: &Gpu, sub: &mut Sub) {
     else {
         return;
     };
-    let _ = g;
+    let rb = if copy {
+        super::queue::wb_bufs::take(g, LOG_BYTES as u64, "raw write log").ok().filter(|b| !b.ptr.is_null())
+    } else {
+        None
+    };
+    if let Some(rb) = &rb {
+        super::queue::full_barrier(g, sub.main);
+        let r = [vk::BufferCopy { src_offset: off, dst_offset: 0, size: LOG_BYTES as u64 }];
+        unsafe { g.dev().cmd_copy_buffer(sub.main, buf, rb.buf, &r) };
+    }
+    let src = rb.as_ref().map_or(ptr + off as usize, |b| b.ptr as usize);
+    let rb = rb.map(LogCopy);
     // before the write-backs land and the game's events: the upload skip must know of these stores before the game
     // can act on this submission's completion (audit H1)
-    sub.post.push(super::queue::Post::Early(Box::new(move |_g: &Gpu, value: u64| {
-        // SAFETY: the submission's staging memory (host-visible, mapped) stays until it is recycled, after this
-        let log = unsafe { core::slice::from_raw_parts((ptr + off as usize) as *const u32, LOG_BYTES / 4) };
+    sub.post.push(super::queue::Post::Early(Box::new(move |g: &Gpu, value: u64| {
+        // read once (SAFETY: the host copy, or the submission's staging memory, host-visible and mapped, stays until
+        // it is recycled, after this)
+        let mut words = vec![0u32; LOG_BYTES / 4];
+        unsafe { core::ptr::copy_nonoverlapping(src as *const u32, words.as_mut_ptr(), LOG_BYTES / 4) };
+        if let Some(LogCopy(b)) = rb {
+            super::queue::wb_bufs::give(g, b);
+        }
+        let log = &words[..];
         // every range the log names, whatever its size or identity (`logged_ranges` keeps only those written back):
         // its upload-skip hashes go, and it is never skipped again
         for (k, &word) in log.iter().enumerate() {

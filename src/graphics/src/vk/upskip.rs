@@ -740,6 +740,8 @@ pub struct LandingPre {
     eq: Vec<u8>,
     /// the hash of the GPU's bytes of each changed whole page (0: none made)
     h: Vec<u64>,
+    /// the GPU compared the range (`wbdiff`): the bytes of pages it left as they were are not in the readback buffer
+    absent: bool,
 }
 
 /// `LandingPre` of the write-back of [a, a + n) from `src` with baseline `before` (may be null); None when the skip is
@@ -790,7 +792,46 @@ pub fn landing_pre(a: u64, n: u64, src: *const u8, before: *const u8) -> Option<
         lo_pg,
         eq: eq.into_iter().map(|v| v.into_inner()).collect(),
         h: h.into_iter().map(|v| v.into_inner()).collect(),
+        absent: false,
     })
+}
+
+/// `LandingPre` of a write-back the GPU compared (`wbdiff`): `flags` holds one word a page from `a`'s page (1 the GPU
+/// left it as it was, its bytes not copied back; 2 copied), and only the changed whole pages are hashed (from `src`,
+/// where they were copied). Made whether or not the upload skip is on: the landing must know which pages' bytes it
+/// has (`same_pages`).
+pub fn landing_pre_flags(a: u64, n: u64, src: *const u8, flags: *const u32) -> Option<LandingPre> {
+    if n == 0 || src.is_null() || flags.is_null() {
+        return None;
+    }
+    let _t = Timer(std::time::Instant::now(), &PRE_NS);
+    let lo_pg = a & !(PAGE - 1);
+    let pages = ((a + n - lo_pg).div_ceil(PAGE)) as usize;
+    // SAFETY: the write-back's flags, one word a page of the range, written by its submission (completed)
+    let f = unsafe { core::slice::from_raw_parts(flags, pages) };
+    let mut eq = vec![0u8; pages];
+    let mut h = vec![0u64; pages];
+    let mut copied = 0u64;
+    for k in 0..pages {
+        let p = lo_pg + k as u64 * PAGE;
+        if f[k] != 1 {
+            copied += (p + PAGE).min(a + n) - p.max(a);
+        }
+        if p < a || p + PAGE > a + n {
+            continue;
+        }
+        if f[k] == 1 {
+            eq[k] = 1;
+        } else {
+            eq[k] = 2;
+            if on() {
+                // SAFETY: a copied page of the write-back's readback buffer (n bytes from `a`)
+                h[k] = page_hash(unsafe { core::slice::from_raw_parts(src.add((p - a) as usize), PAGE as usize) });
+            }
+        }
+    }
+    super::wbdiff::landed(a, n, copied);
+    Some(LandingPre { a, n, lo_pg, eq, h, absent: true })
 }
 
 impl LandingPre {
@@ -846,6 +887,10 @@ fn landed_pre(
                 pg.kept
             } else if e == 2 && h != 0 {
                 h
+            } else if pre.absent {
+                // the GPU compared it and left it as it was, but its bytes did not come back and no hash was kept: not
+                // known (the next CPU write of it is uploaded)
+                0
             } else {
                 // the GPU left the page as it was but no hash was kept for it: the hash of its bytes now
                 // SAFETY: the write-back's readback buffer holds n bytes from `a`
@@ -1539,5 +1584,63 @@ mod tests {
         assert_eq!(pre.same_pages(), vec![lo + PAGE, lo + 3 * PAGE, lo + 4 * PAGE]);
         let none = landing_pre(a, n, after.as_ptr(), core::ptr::null()).unwrap();
         assert!(none.same_pages().is_empty(), "no baseline: every page lands as before");
+    }
+
+    /// OOT-FPS: a landing the GPU compared (`wbdiff`: flags a page, only changed and partial pages' bytes copied back)
+    /// leaves the same unchanged pages and page states as one compared on the host, though the bytes of the pages the
+    /// GPU left alone are garbage in its buffers; a page left alone with no kept hash becomes unknown (hash 0), not
+    /// the hash of those garbage bytes.
+    #[test]
+    fn a_landing_compared_on_the_gpu_decides_as_one_compared_on_the_host() {
+        let _s = SERIAL.lock().unwrap();
+        let pages = 6u64;
+        let (_m, base) = pool(pages);
+        let size = pages * PAGE;
+        let (a, n) = (base + 100, size - 200);
+        let mut outcome = Vec::new();
+        for gpu in [false, true] {
+            drop_any(base);
+            for k in 0..pages {
+                set(base + k * PAGE, &vec![(k as u8).wrapping_add(1); PAGE as usize]);
+            }
+            assert_eq!(runs(base, size, base, size), vec![(base, size)]);
+            forget(base + 2 * PAGE, PAGE);
+            gpu_writes(a, n);
+            let k = next_epoch();
+            let before = bytes(a, n);
+            let mut after = before.clone();
+            for pg in [1u64, 4] {
+                after[(pg * PAGE - 100) as usize + 7] ^= 0x5a;
+            }
+            let (pre, src, bf) = if gpu {
+                // what the kernel leaves: flags 1 for whole pages left alone (bytes not copied: garbage here), 2 for
+                // changed whole pages and the partial first and last pages (copied)
+                let flags: Vec<u32> = (0..pages).map(|p| if [0, 1, 4, 5].contains(&p) { 2 } else { 1 }).collect();
+                let (mut src, mut bf) = (vec![0xeeu8; n as usize], vec![0x11u8; n as usize]);
+                for p in [0u64, 1, 4, 5] {
+                    let lo = (p * PAGE).saturating_sub(100) as usize;
+                    let hi = (((p + 1) * PAGE - 100) as usize).min(n as usize);
+                    src[lo..hi].copy_from_slice(&after[lo..hi]);
+                    bf[lo..hi].copy_from_slice(&before[lo..hi]);
+                }
+                (landing_pre_flags(a, n, src.as_ptr(), flags.as_ptr()).unwrap(), src, bf)
+            } else {
+                (landing_pre(a, n, after.as_ptr(), before.as_ptr()).unwrap(), after.clone(), before.clone())
+            };
+            let same_all = pre.same_pages();
+            landed_with(base, a, n, src.as_ptr(), bf.as_ptr(), k, 1, Some(&pre));
+            let st = state();
+            let pgs: Vec<u64> = st.as_ref().unwrap().pools[&base].pages.iter().map(|p| p.hash).collect();
+            outcome.push((same_all, pgs));
+        }
+        let (host, gpu) = (&outcome[0], &outcome[1]);
+        assert_eq!(host.0, gpu.0, "the same unchanged pages");
+        assert_eq!(host.0, vec![base + 2 * PAGE, base + 3 * PAGE]);
+        for p in [0usize, 1, 3, 4, 5] {
+            assert_eq!(host.1[p], gpu.1[p], "page {p}: the same hash");
+        }
+        assert!(host.1[2] != 0, "host: page 2 (no kept hash) hashed from its bytes");
+        assert_eq!(gpu.1[2], 0, "GPU: page 2's bytes did not come back: unknown");
+        drop_any(base);
     }
 }
