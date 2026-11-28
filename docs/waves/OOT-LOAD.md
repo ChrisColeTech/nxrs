@@ -74,6 +74,22 @@ buffer, and where the fault lies against each), buffers starting above the fault
 destroyed with the timeline then, and a CPU check where each set's offset is handed to the GPU (the bound chunk is the
 one the set was written in and holds it: a red line naming the stage and shader otherwise).
 
+## Verified (GPU 0; runs in this worktree's `build/play/`; other waves were building and running on the machine)
+
+| run | scenario | result | FPS (report.md) |
+|---|---|---|---|
+| `20261128-091353-fix1` | old oot-saved steps | loaded, Link in his house by 65 s, no loss | [110, 150] 58.3 / 5 % low 53.8 |
+| `20261128-091717-saved-r1` | oot-saved | loaded, stood, walked, no loss; references taken | [80, 145] 56.6 / 51.3 |
+| `20261128-092149-saved-walk-r2` | oot-saved-walk | as r1; references taken | [165, 233] 43.5 / 29.5 |
+| `20261128-092605-oot-regr` | oot (full) | completed, 6/6 checks on route, no loss | [845, 915] 43.1 / 29.6 (base `20261128-044556-r2-base` 44.9 / 30) |
+| `20261128-094134-saved-r3` | oot-saved | 5/5 checks on route, no loss | [80, 155] 56.6 / 50.0 |
+
+The full run's standing stretch [660, 820] from its frames csv (the same calculation for both): 46.7 FPS / 5 % low 41.5
+against the baseline's 48.1 / 43.4 (indicative: the machine was shared). Every sheet read: title, Load list, Load /
+Cancel, ~20 s of black load, Link under control in his house with Navi; the walks move through the house. Red lines
+in the saved runs: the known "draw with no render target" and one "used all its occlusion queries" at ~57 s.
+`cargo test --release -p graphics`: 329 passed, 6 ignored; `py -m unittest scripts.test_play`: 12 OK.
+
 ## Files expected
 
 - `src/graphics/src/vk/lost_ring.rs` (bind ring, report above the fault), `src/graphics/src/vk/exec.rs` (bind
