@@ -4725,24 +4725,34 @@ pub(crate) fn merge_changed_bytes(guest: &mut [u8], after: &[u8], before: &[u8])
     // changed page: OOT-FPS, this loop byte by byte was ~2.7 ms a frame of the completion thread under the pool lock);
     // any other word byte by byte as before (only changed bytes are stored: a CPU store beside them in the same word is
     // never overwritten)
-    let word = |s: &[u8], i: usize| u64::from_ne_bytes(s[i..i + 8].try_into().unwrap());
+    let word = |s: &[u8], i: usize| u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+    // 0x80 in each byte of `x` that is not zero
+    let nz = |x: u64| ((x & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f) | x) & 0x8080_8080_8080_8080;
     let n = guest.len();
     let mut i = 0;
-    while i < n {
-        if i + 8 <= n && word(after, i) == word(before, i) && word(guest, i) == word(before, i) {
-            i += 8;
-            continue;
-        }
-        let end = (i + 8).min(n);
-        for k in i..end {
-            let (new, old) = (after[k], before[k]);
-            if new != old {
-                guest[k] = new;
-            } else if guest[k] != old {
-                kept += 1;
+    while i + 8 <= n {
+        let (a, b, gw) = (word(after, i), word(before, i), word(guest, i));
+        let ch = nz(a ^ b);
+        // bytes the producer left alone that the CPU has changed: kept
+        kept += (nz(gw ^ b) & !ch).count_ones() as u64;
+        if ch == 0x8080_8080_8080_8080 {
+            guest[i..i + 8].copy_from_slice(&after[i..i + 8]);
+        } else if ch != 0 {
+            for k in 0..8 {
+                if ch & (0x80 << (8 * k)) != 0 {
+                    guest[i + k] = after[i + k];
+                }
             }
         }
-        i = end;
+        i += 8;
+    }
+    for k in i..n {
+        let (new, old) = (after[k], before[k]);
+        if new != old {
+            guest[k] = new;
+        } else if guest[k] != old {
+            kept += 1;
+        }
     }
     kept
 }
