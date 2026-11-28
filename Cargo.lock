@@ -1471,6 +1471,7 @@ dependencies = [
  "sha2",
  "shaders",
  "translator",
+ "translator3ds",
  "unicode-normalization",
  "windows-sys 0.61.2",
 ]
@@ -2601,6 +2602,9 @@ dependencies = [
 [[package]]
 name = "translator3ds"
 version = "0.1.0"
+dependencies = [
+ "translator",
+]
 
 [[package]]
 name = "ttf-parser"

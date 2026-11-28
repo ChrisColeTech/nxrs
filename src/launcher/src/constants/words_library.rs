@@ -8,7 +8,14 @@ pub const LOAD_FAILED: &str = "Library could not be loaded";
 pub const SAVE_FAILED: &str = "Could not save library";
 pub const NO_MAIN: &str = "This folder does not contain exefs/main or main.";
 pub const NOT_CARD: &str = "{} is not a card image (no XCI header).";
-pub const NOT_SOURCE: &str = "Select an indexed NUP, a standard application NSP, a card image (XCI), an NRO, or an extracted ExeFS folder.";
+pub const NOT_CART: &str =
+    "{} is not a 3DS card image (no NCSD header, or partition 0 is not the game's executable).";
+pub const NOT_CIA: &str =
+    "{} is not a game .cia (no CIA header, or it holds no executable content).";
+pub const NOT_CXI: &str = "{} is not a 3DS executable (no NCCH header where .cxi/.app keeps it).";
+pub const NOT_GAME_CIA: &str = "{} is an update or add-on .cia, not a game.";
+pub const ENCRYPTED_3DS: &str = "{} is encrypted. nxrs needs a decrypted dump (GodMode9 and no-intro dumps are); no keys are included.";
+pub const NOT_SOURCE: &str = "Select an indexed NUP, a standard application NSP, a card image (XCI), an NRO, a decrypted 3DS dump (.3ds .cia .cxi), or an extracted ExeFS folder.";
 pub const NO_EXECUTABLE: &str = "The executable does not exist.";
 pub const INCOMPLETE_BUILD: &str =
     "A native build needs its executable, matching code module, and _data folder together.";
@@ -63,7 +70,10 @@ pub const CHOOSE_ARTWORK: &str = "Choose artwork in Properties";
 pub const ARTWORK_ERROR: &str = "Cannot load artwork: ";
 pub const PICK_GAME: &str = "Add game";
 pub const PICK_FOLDER: &str = "Add extracted game folder";
-pub const GAME_FILTER: (&str, &[&str]) = ("Game packages", &["nup", "nsp", "xci", "nro"]);
+pub const GAME_FILTER: (&str, &[&str]) = (
+    "Game packages",
+    &["nup", "nsp", "xci", "nro", "3ds", "cia", "cxi", "app"],
+);
 
 /// The keys (`installKeys`).
 pub const PICK_KEYS: &str = "Install Nintendo keys";
