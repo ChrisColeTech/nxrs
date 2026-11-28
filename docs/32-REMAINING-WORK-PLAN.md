@@ -239,7 +239,8 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       completion thread's landings, ~3 ms); peak 30.7 GB near the 32 GB cap; yield cost on host CPU; the sleep
       change is global (other titles need a regression run). Lead's MK8D regression after merge: 59.9 / 59.0
       (`20261128-022358-mk8d`, sheets correct).
-- [ ] **OOT-LOCK** (2026-11-28, code NOT merged; doc `docs/waves/OOT-LOCK.md`, code on branch `ootlock` `4641f8b`).
+- [ ] **OOT-LOCK** (2026-11-28, code NOT merged; doc `docs/waves/OOT-LOCK.md`, code `ootlock` `4641f8b`, branch deleted, kept in
+      `D:\Projects\RecompLauncherEngine-backup-20261128-084206.bundle`).
       Landings-first by the waited fence (`NXGFX_LAND_FIRST`) cut the main thread's `nvnSyncWait` 272 -> 152 ms/s
       but the time moved into waiting for replay-queue room (44 -> 124 ms/s); frame ms at equal draws within +-1 ms;
       `oot` 50.0 / 39.0 (`20261128-024046-lock-base`) -> 46.9 / 30.0 (`-040748-lock-after`). Moved nothing visible,
@@ -248,7 +249,7 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       watch 1.2, landing waits ~2); a fixed-camera window to make runs comparable (noise ~+-1 ms).
 - [~] **OOT-REPLAY2** (2026-11-28; merged: `oot-still` scenario (oot's steps, window 660-820 s on the standing
       stretch, ~2,050 draws every run) + its route references + `docs/waves/OOT-REPLAY2.md`; code D NOT merged,
-      branch `ootreplay` `598dfcc`). D (`NXGFX_SYNC_HASH_UNLOCKED`: pool sync drops the pool lock while hashing):
+      `ootreplay` `598dfcc`, branch deleted, kept in the 2026-11-28 08:42 backup bundle). D (`NXGFX_SYNC_HASH_UNLOCKED`: pool sync drops the pool lock while hashing):
       `oot-still` 48.1 / 44.0 (`20261128-044556-r2-base`) -> 49.6 / 47.0 (`-070833-r2-after`), frame 20.80 ->
       20.14 ms, inside the base's own 20.63-21.27 spread; the lanes' resolve lock waits rose 0.4-0.7 -> 1.1-1.4 ms
       (the OOT-LOCK pattern); Fault A 33 in `-072415-r2-house` against 10-21 before, with the lock released mid-sync.
