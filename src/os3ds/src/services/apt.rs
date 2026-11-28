@@ -43,34 +43,42 @@ pub const IS_STANDARD_MEMORY_LAYOUT: u32 = 0x0104;
 /// the application applet id and POS_APP
 const APP_ID: u32 = 0x300;
 
-pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) -> Reply {
+/// APT signal type Wakeup (3dbrew `NS and APT Services` §Signal)
+pub const SIGNAL_WAKEUP: u32 = 1;
+
+pub fn command(host: &Host, process: &Process3ds, tls: u32, request: &Request) -> Reply {
     match request.cmd {
         GET_LOCK_HANDLE => {
             // the APT lock is a mutex the service hands out already held; the app releases it
             let lock = host.state.lock().unwrap().fresh_handle();
             host.set_apt_lock(lock);
             host.say(format!("apt: GetLockHandle -> {lock:#x}"));
+            // named once: the lock is held service-side because runtime3ds's WaitSynchronization
+            // does not take ownership of a kernel mutex (so its ReleaseMutex would fail)
+            host.gap("apt: the APT lock is a service-side lock (runtime3ds waits do not acquire kernel mutexes)");
             Reply::new(vec![R_OK, 0, 0, 0, lock], 2)
         }
         INITIALIZE => {
-            // response: result, translation descriptor 0x04000000 + notification + resume handles
-            // (one-shot events: the app consumes the initial resume signal once)
+            // response: result, translation descriptor 0x04000000 + the notification and
+            // parameter events (one-shot). An application starts with a Wakeup parameter
+            // pending, so the parameter event starts signaled.
             let notification = process.create_event(0);
-            let resume = process.create_event(0);
-            process.signal_event(resume);
+            let parameter = process.create_event(0);
+            process.signal_event(parameter);
             {
                 let mut state = host.state.lock().unwrap();
                 state.apt.initialized = true;
                 state.apt.applet_id = request.word(0).max(APP_ID);
                 state.apt.applet_pos = request.word(1) & 0b111;
                 state.apt.parameter_pending = true;
+                state.apt_parameter_event = Some(parameter);
             }
             host.say(format!(
-                "apt: Initialize appID {:#x}, attr {:#x} (notification {notification:#x}, resume {resume:#x})",
+                "apt: Initialize appID {:#x}, attr {:#x} (notification {notification:#x}, parameter {parameter:#x})",
                 request.word(0),
                 request.word(1)
             ));
-            Reply::new(vec![R_OK, 0x0400_0000, notification, resume], 3)
+            Reply::new(vec![R_OK, 0x0400_0000, notification, parameter], 3)
         }
         ENABLE => {
             host.state.lock().unwrap().apt.enabled = true;
@@ -122,10 +130,22 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
                 return Reply::err(0xC8A0_CFFA);
             }
             if request.cmd == RECEIVE_PARAMETER {
-                host.state.lock().unwrap().apt.parameter_pending = false;
+                // delivered: the parameter event's one-shot signal is consumed with it
+                let event = {
+                    let mut state = host.state.lock().unwrap();
+                    state.apt.parameter_pending = false;
+                    state.apt_parameter_event
+                };
+                if let Some(event) = event {
+                    process.clear_event(event);
+                }
             }
-            // a wakeup parameter with no payload; the handle and buffer fields are zero
-            Reply::new(vec![R_OK, 0, 1, 0, 0, 0, 0, 0], 4)
+            host.say(format!("apt: {} -> Wakeup", if request.cmd == RECEIVE_PARAMETER { "ReceiveParameter" } else { "GlanceParameter" }));
+            // response (3dbrew 0x000D0104): result, sender AppID, signal type (1 = Wakeup),
+            // actual parameter size; a move-handle descriptor + handle (none), and the static
+            // buffer descriptor + the receiving thread's static buffer 0 (TLS+0x184; no payload)
+            let buffer = process.memory.read32(tls.wrapping_add(0x184));
+            Reply::new(vec![R_OK, 0, SIGNAL_WAKEUP, 0, 0x10, 0, 2, buffer], 4)
         }
         CANCEL_PARAMETER => Reply::ok(),
         GET_PREPARATION_STATE => {
@@ -151,20 +171,29 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
         }
         GET_PROGRAM_ID => Reply::new(vec![R_OK, 0x0006_2300, 0x0004_0000], 0),
         APPLET_UTILITY => {
-            // word 1 = utility id: the applet state actions are accepted headless
+            // word 1 = utility id. There is no applet manager headless (no home menu, no other
+            // applet), so the utility is named in the ledger; its out-value is 0 (none).
             host.say(format!("apt: AppletUtility id {:#x}", request.word(0)));
+            host.gap(format!(
+                "apt: AppletUtility {:#x} has no applet manager behind it (answered 0)",
+                request.word(0)
+            ));
             Reply::new(vec![R_OK, 0], 0)
         }
         GET_PROGRAM_INFO | GET_APPLET_PROGRAM_INFO => {
-            Reply::new(vec![R_OK, 0, 0, 0, 0], 0)
+            host.gap(format!("apt: command {:#06x} (program info) not implemented", request.cmd));
+            Reply::err(R_INVALID_CMD)
         }
-        SET_FATAL_ERRDISP_MODE | HARDWARE_RESET_ASYNC => Reply::ok(),
+        SET_FATAL_ERRDISP_MODE => Reply::ok(),
+        HARDWARE_RESET_ASYNC | GET_CAPTURE_INFO => {
+            host.gap(format!("apt: command {:#06x} refused headless", request.cmd));
+            Reply::err(R_INVALID_CMD)
+        }
         SET_APPLICATION_CPU_TIME_LIMIT => Reply::ok(),
         GET_APPLICATION_CPU_TIME_LIMIT => Reply::new(vec![R_OK, 0], 0),
         GET_STARTUP_ARGUMENT => Reply::new(vec![R_OK, 0, 0], 0),
         SET_SCREEN_CAPTURE_POST_PERMISSION => Reply::ok(),
         GET_SCREEN_CAPTURE_POST_PERMISSION => Reply::new(vec![R_OK, 0], 0),
-        GET_CAPTURE_INFO => Reply::new(vec![R_OK, 0], 0),
         GET_TARGET_PLATFORM => Reply::new(vec![R_OK, 0], 0),
         CHECK_NEW_3DS => Reply::new(vec![R_OK, 0], 0),
         GET_APPLICATION_RUNNING_MODE => Reply::new(vec![R_OK, 0], 0),

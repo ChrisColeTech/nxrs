@@ -1,28 +1,18 @@
-//! soc: the socket service. The buffer handshake and the state queries answer; connecting is
-//! gap-refused (the wasm lane refuses per title too, plan §4's table).
+//! soc: the socket service (3dbrew `Socket Services`). Initialize and Shutdown answer (the
+//! shared work buffer the app hands over needs no host action); every socket call is refused
+//! with a gap line (plan §4: sockets are deferred, the wasm lane refuses per title too).
 
-use crate::hle::{Host, Reply, Request, R_OK, R_INVALID_CMD};
+use crate::hle::{Host, Reply, Request, R_INVALID_CMD};
 use runtime3ds::Process3ds;
 
-pub const INITIALIZE: u32 = 0x0001;
-pub const SHUTDOWN: u32 = 0x0002;
-pub const GET_SOCKET: u32 = 0x0003;
-pub const CONNECT: u32 = 0x0004;
-pub const SEND_TO: u32 = 0x0005;
-pub const RECV_FROM: u32 = 0x0006;
-pub const CLOSE: u32 = 0x0007;
-pub const GETHOSTBYNAME: u32 = 0x0008;
+pub const INITIALIZE_SOCKETS: u32 = 0x0001;
+pub const SHUTDOWN_SOCKETS: u32 = 0x0019;
 
 pub fn command(host: &Host, _process: &Process3ds, _tls: u32, request: &Request) -> Reply {
     match request.cmd {
-        INITIALIZE | SHUTDOWN | CLOSE => Reply::ok(),
-        CONNECT | SEND_TO | RECV_FROM | GETHOSTBYNAME => {
-            host.gap(format!("soc: command {:#x} not executed (sockets are deferred)", request.cmd));
-            Reply::err(crate::hle::R_INVALID)
-        }
-        GET_SOCKET => Reply::new(vec![R_OK, 0, 0], 0),
+        INITIALIZE_SOCKETS | SHUTDOWN_SOCKETS => Reply::ok(),
         other => {
-            host.gap(format!("soc: command {other:#010x} not implemented"));
+            host.gap(format!("soc: command {other:#06x} refused (sockets are deferred)"));
             Reply::err(R_INVALID_CMD)
         }
     }

@@ -7,12 +7,22 @@
 use crate::hle::{self, Host};
 use runtime3ds::context::Context;
 use runtime3ds::{svc, Process3ds};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 static HOST: OnceLock<Arc<Host>> = OnceLock::new();
+/// the diagnostic wait/mutex lines are bounded so a polling loop cannot flood the log
+static PROBE_LINES: AtomicU32 = AtomicU32::new(0);
+const PROBE_LIMIT: u32 = 400;
 
 fn host() -> Option<&'static Arc<Host>> {
     HOST.get()
+}
+
+fn probe(host: &Host, line: String) {
+    if PROBE_LINES.fetch_add(1, Ordering::Relaxed) < PROBE_LIMIT {
+        host.say(line);
+    }
 }
 
 /// installs the os3ds svc handlers into runtime3ds's registry
@@ -30,6 +40,16 @@ pub fn install(host: Arc<Host>) {
     svc::set_handler(0x24, wait_one_probe);
     svc::set_handler(0x25, wait_n_probe);
     svc::set_handler(0x3C, break_probe);
+    svc::set_handler(0x18, signal_probe);
+}
+
+/// diagnostics: name the event and thread of every SignalEvent, then let the kernel answer
+fn signal_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
+    if let Some(host) = host() {
+        let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
+        probe(host, format!("svc SignalEvent handle {:#x} thread {thread} at {:#x}", ctx.r[0], ctx.r[15]));
+    }
+    false
 }
 
 fn break_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
@@ -51,7 +71,7 @@ fn wait_one_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool
         }
         let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
         let ns = (ctx.r[2] as u64) | ((ctx.r[3] as u64) << 32);
-        host.say(format!(
+        probe(host, format!(
             "svc WaitSynchronization1 handle {:#x} thread {thread} ns {ns} at {:#x}",
             ctx.r[0], ctx.r[15]
         ));
@@ -76,7 +96,7 @@ fn wait_n_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
         for i in 0..count {
             handles.push(process.memory.read32(ctx.r[1].wrapping_add(4 * i)));
         }
-        host.say(format!(
+        probe(host, format!(
             "svc WaitSynchronizationN thread {thread} handles {handles:08x?} count {count} waitAll {} at {:#x}",
             ctx.r[3], ctx.r[15]
         ));
@@ -92,7 +112,7 @@ fn release_mutex_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -
         return true;
     }
     let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
-    host.say(format!(
+    probe(host, format!(
         "svc ReleaseMutex handle {:#x} thread {thread} at {:#x}",
         ctx.r[0], ctx.r[15]
     ));

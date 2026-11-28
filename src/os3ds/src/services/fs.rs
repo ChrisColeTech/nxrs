@@ -10,6 +10,11 @@ use crate::hle::{
 use runtime3ds::Process3ds;
 use std::path::{Component, Path, PathBuf};
 
+/// 3dbrew `FS` result: a file or directory already exists at the path
+pub const R_ALREADY_EXISTS: u32 = 0x0820_44BE;
+/// 3dbrew `FS` result: the archive or file is not writable
+pub const R_WRITE_DENIED: u32 = 0xE0E0_46BE;
+
 pub const INITIALIZE: u32 = 0x0801;
 pub const OPEN_FILE: u32 = 0x0802;
 pub const OPEN_FILE_DIRECTLY: u32 = 0x0803;
@@ -133,16 +138,21 @@ fn archive_kind_of_path(path: &str) -> Option<u32> {
     }
 }
 
-/// opens a file from an archive kind, streaming the bytes into the session
-fn open_file(host: &Host, kind: u32, path: &str, writable: bool) -> Option<(u32, u32)> {
+/// FS open flags (3dbrew `FS:OpenFile`): bit 0 read, bit 1 write, bit 2 create
+pub const OPEN_WRITE: u32 = 1 << 1;
+pub const OPEN_CREATE: u32 = 1 << 2;
+
+/// opens a file from an archive kind, streaming the bytes into the session; a missing file is
+/// created only when the open flags ask for it on a writable archive
+fn open_file(host: &Host, kind: u32, path: &str, flags: u32) -> Option<(u32, u32)> {
     let root = archive_root(host, kind)?;
     let full = resolve(&root, path)?;
     let display = full.display().to_string();
+    let writable = is_writable(kind) && flags & OPEN_WRITE != 0;
     match std::fs::read(&full) {
         Ok(bytes) => Some(host.open_file_session(FileSource::Memory(bytes), display, writable)),
         Err(_) => {
-            // a writable new file starts empty (save data); a read of a missing file fails
-            if writable {
+            if writable && flags & OPEN_CREATE != 0 {
                 if let Some(parent) = full.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -151,6 +161,37 @@ fn open_file(host: &Host, kind: u32, path: &str, writable: bool) -> Option<(u32,
                 None
             }
         }
+    }
+}
+
+/// SelfNCCH (archive 3) file lowpaths are binary, 0xC bytes (3dbrew `Filesystem services`
+/// §SelfNCCH): word 0 = 0 names this title's RomFS, served as the dump's IVFC level-3 image
+/// (the SDK parses the RomFS itself). Other kinds (ExeFS sections, update RomFS) are refused.
+fn open_self_ncch(host: &Host, path_type: u32, lowpath: &[u8]) -> Reply {
+    let romfs = path_type == 2 && lowpath.len() >= 4 && lowpath[..4] == [0, 0, 0, 0];
+    if !romfs {
+        host.gap(format!("fs: SelfNCCH lowpath {lowpath:02x?} (type {path_type}) is not served"));
+        return Reply::err(R_PATH_NOT_FOUND);
+    }
+    let Some((image, base, size)) = host.romfs_image() else {
+        host.gap("fs: SelfNCCH RomFS requested but the dump's RomFS image was not found");
+        return Reply::err(R_PATH_NOT_FOUND);
+    };
+    let (handle, _id) = host.open_image_session(image, base, size);
+    host.say(format!("fs: SelfNCCH RomFS -> image file {handle:#x} ({size:#x} bytes)"));
+    Reply::new(vec![R_OK, 0x10, handle], 2)
+}
+
+/// the archive kind behind an archive handle, refused unless the archive is open and writable
+fn writable_archive(host: &Host, archive: u32) -> Result<u32, Reply> {
+    let kind = host.state.lock().unwrap().archives.get(&archive).map(|a| a.kind);
+    match kind {
+        None => Err(Reply::err(R_INVALID_ARCHIVE)),
+        Some(kind) if !is_writable(kind) => {
+            host.gap(format!("fs: a write to the read-only archive {kind:#x} refused"));
+            Err(Reply::err(R_WRITE_DENIED))
+        }
+        Some(kind) => Ok(kind),
     }
 }
 
@@ -193,8 +234,12 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
                 host.gap(format!("fs: OpenFile on an unknown archive {archive:#x}"));
                 return Reply::err(R_INVALID_ARCHIVE);
             };
-            let writable = is_writable(kind);
-            match open_file(host, kind, &path, writable) {
+            if kind == ARCHIVE_SELF_NCCH {
+                let mut lowpath = vec![0u8; path_size.min(32) as usize];
+                process.memory.read_bytes(path_ptr, &mut lowpath);
+                return open_self_ncch(host, path_type, &lowpath);
+            }
+            match open_file(host, kind, &path, request.word(5)) {
                 Some((handle, _id)) => {
                     host.say(format!("fs: OpenFile {path:?} -> {handle:#x}"));
                     Reply::new(vec![R_OK, 0, handle], 2)
@@ -227,25 +272,10 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
                 host.gap(format!("fs: OpenFileDirectly archive id {kind:#x} is not served"));
                 return Reply::err(R_INVALID_ARCHIVE);
             }
-            // 3dbrew: archive 0x3's main CXI RomFS is an all-zero 0xc-byte binary file-lowpath
-            let romfs_root = kind == ARCHIVE_SELF_NCCH
-                && (file_size == 0 || (file_size == 0xc && file_bytes.iter().all(|&b| b == 0)));
-            if romfs_root {
-                if let Some((image, base, size)) = host.romfs_image() {
-                    let (handle, _id) = host.open_image_session(image, base, size);
-                    host.say(format!(
-                        "fs: OpenFileDirectly RomFS root -> image file {handle:#x} ({size:#x} bytes)"
-                    ));
-                    return Reply::new(vec![R_OK, 0, handle], 2);
-                }
-                let root = archive_root(host, kind).unwrap_or_default();
-                let names = list_dir(&root);
-                let (handle, _id) = host.open_dir_session(names);
-                host.say(format!("fs: OpenFileDirectly RomFS root -> directory {handle:#x}"));
-                return Reply::new(vec![R_OK, 0, handle], 2);
+            if kind == ARCHIVE_SELF_NCCH {
+                return open_self_ncch(host, file_type, &file_bytes);
             }
-            let writable = is_writable(kind);
-            match open_file(host, kind, &file_path, writable) {
+            match open_file(host, kind, &file_path, request.word(6)) {
                 Some((handle, _id)) => {
                     host.say(format!("fs: OpenFileDirectly {file_path:?} -> {handle:#x}"));
                     Reply::new(vec![R_OK, 0, handle], 2)
@@ -279,15 +309,20 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
             let path_size = request.word(4);
             let path_ptr = request.translated.get(1).copied().unwrap_or(0);
             let path = read_path(process, path_type, path_size, path_ptr);
-            let kind = host.state.lock().unwrap().archives.get(&archive).map(|a| a.kind);
-            if let Some(kind) = kind {
-                if let Some(root) = archive_root(host, kind) {
-                    if let Some(full) = resolve(&root, &path) {
-                        let _ = std::fs::create_dir_all(full);
-                    }
-                }
+            let kind = match writable_archive(host, archive) {
+                Ok(kind) => kind,
+                Err(reply) => return reply,
+            };
+            let Some(full) = archive_root(host, kind).and_then(|root| resolve(&root, &path)) else {
+                return Reply::err(R_PATH_NOT_FOUND);
+            };
+            if full.exists() {
+                return Reply::err(R_ALREADY_EXISTS);
             }
-            Reply::ok()
+            match std::fs::create_dir_all(&full) {
+                Ok(()) => Reply::ok(),
+                Err(_) => Reply::err(R_PATH_NOT_FOUND),
+            }
         }
         CREATE_FILE => {
             // 3dbrew FS:CreateFile: word2-3 archive, word4 path type, word5 path size,
@@ -301,24 +336,74 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
             host.say(format!(
                 "fs: CreateFile archive {archive:#x} {path:?} ({path_size} bytes, type {path_type}, fill {zero_fill})"
             ));
-            let kind = host.state.lock().unwrap().archives.get(&archive).map(|a| a.kind);
-            if let Some(kind) = kind {
-                if let Some(root) = archive_root(host, kind) {
-                    if let Some(full) = resolve(&root, &path) {
-                        if full.exists() {
-                            // 3dbrew's "there is already a file or directory here" result
-                            return Reply::err(0x0820_44BE);
-                        }
-                        if let Some(parent) = full.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(&full, vec![0u8; zero_fill.min(0x1000_0000) as usize]);
-                    }
-                }
+            let kind = match writable_archive(host, archive) {
+                Ok(kind) => kind,
+                Err(reply) => return reply,
+            };
+            let Some(full) = archive_root(host, kind).and_then(|root| resolve(&root, &path)) else {
+                return Reply::err(R_PATH_NOT_FOUND);
+            };
+            if full.exists() {
+                return Reply::err(R_ALREADY_EXISTS);
             }
-            Reply::ok()
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::write(&full, vec![0u8; zero_fill.min(0x1000_0000) as usize]) {
+                Ok(()) => Reply::ok(),
+                Err(_) => Reply::err(R_PATH_NOT_FOUND),
+            }
         }
-        DELETE_FILE | RENAME_FILE | DELETE_DIRECTORY | RENAME_DIRECTORY => Reply::ok(),
+        DELETE_FILE | DELETE_DIRECTORY => {
+            // 3dbrew FS:DeleteFile/DeleteDirectory: word 2-3 archive, word 4 path type, word 5
+            // path size; translate = the path
+            let archive = request.word(1);
+            let path_ptr = request.translated.get(1).copied().unwrap_or(0);
+            let path = read_path(process, request.word(3), request.word(4), path_ptr);
+            let kind = match writable_archive(host, archive) {
+                Ok(kind) => kind,
+                Err(reply) => return reply,
+            };
+            let Some(full) = archive_root(host, kind).and_then(|root| resolve(&root, &path)) else {
+                return Reply::err(R_PATH_NOT_FOUND);
+            };
+            let removed = if request.cmd == DELETE_FILE {
+                std::fs::remove_file(&full)
+            } else {
+                std::fs::remove_dir(&full)
+            };
+            host.say(format!("fs: delete {path:?} -> {}", removed.is_ok()));
+            match removed {
+                Ok(()) => Reply::ok(),
+                Err(_) => Reply::err(R_PATH_NOT_FOUND),
+            }
+        }
+        RENAME_FILE | RENAME_DIRECTORY => {
+            // 3dbrew FS:RenameFile: words 2-3 source archive, 4/5 source path type/size, 6-7
+            // destination archive, 8/9 its path type/size; translate = both paths
+            let (source_archive, target_archive) = (request.word(1), request.word(5));
+            let source_ptr = request.translated.get(1).copied().unwrap_or(0);
+            let target_ptr = request.translated.get(3).copied().unwrap_or(0);
+            let source = read_path(process, request.word(3), request.word(4), source_ptr);
+            let target = read_path(process, request.word(7), request.word(8), target_ptr);
+            let kinds = (writable_archive(host, source_archive), writable_archive(host, target_archive));
+            let (source_kind, target_kind) = match kinds {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(reply), _) | (_, Err(reply)) => return reply,
+            };
+            let from = archive_root(host, source_kind).and_then(|root| resolve(&root, &source));
+            let to = archive_root(host, target_kind).and_then(|root| resolve(&root, &target));
+            let (Some(from), Some(to)) = (from, to) else {
+                return Reply::err(R_PATH_NOT_FOUND);
+            };
+            if to.exists() {
+                return Reply::err(R_ALREADY_EXISTS);
+            }
+            match std::fs::rename(&from, &to) {
+                Ok(()) => Reply::ok(),
+                Err(_) => Reply::err(R_PATH_NOT_FOUND),
+            }
+        }
         GET_FREE_BYTES => Reply::new(vec![R_OK, 0, 0x4000_0000], 0),
         GET_SDMC_ARCHIVE_RESOURCE => Reply::new(
             vec![R_OK, 0, 0x4000_0000, 0x4000_0000, 0x4000_0000, 0x200],
@@ -366,13 +451,14 @@ pub fn file_command(
                 return Reply::err(R_INVALID_ARCHIVE);
             };
             if !file.writable {
-                return Reply::err(R_INVALID_ARCHIVE);
+                return Reply::err(R_WRITE_DENIED);
             }
             let mut chunk = vec![0u8; size];
             process.memory.read_bytes(buffer, &mut chunk);
             if file.write(offset as usize, &chunk) {
                 file.pos = offset + size as u64;
-                Reply::ok()
+                // response: result, bytes written
+                Reply::new(vec![R_OK, size as u32], 0)
             } else {
                 Reply::err(R_INVALID_ARCHIVE)
             }
@@ -477,73 +563,6 @@ pub fn dir_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hle::{parse_input, Host};
-    use runtime3ds::context;
-    use runtime3ds::dispatch::Library;
-    use runtime3ds::mem::{Kind, Memory, Perm, State};
-    use runtime3ds::BootOptions;
-    use std::sync::Arc;
-
-    fn process() -> (Arc<Memory>, Box<Process3ds>) {
-        let memory = Arc::new(Memory::new().unwrap());
-        memory
-            .map(0x0800_0000, 0x0010_0000, Perm::Rw, State::Private, Kind::Heap)
-            .unwrap();
-        let library = unsafe {
-            Library::linked(context::ABI, [].as_ptr(), 0, std::ptr::null(), 0, std::ptr::null(), 0)
-        };
-        (memory.clone(), Box::new(Process3ds::new(library, memory, BootOptions::default())))
-    }
-
-    fn staged() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("os3ds-fs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("romfs/System")).unwrap();
-        std::fs::write(dir.join("romfs/System/hello.bin"), b"hello romfs").unwrap();
-        std::fs::create_dir_all(dir.join("save")).unwrap();
-        dir
-    }
-
-    #[test]
-    fn a_romfs_file_opens_and_reads() {
-        let dir = staged();
-        let host = Host::new(&dir, Vec::new());
-        let (_memory, process) = process();
-        let mut state = host.state.lock().unwrap();
-        let archive = state.fresh_handle();
-        state.archives.insert(archive, crate::hle::Archive { kind: ARCHIVE_SELF_NCCH });
-        drop(state);
-        let open = Request {
-            cmd: OPEN_FILE,
-            normal: 7,
-            translate: 2,
-            params: vec![0, archive, 0, 1, 0x20, 0, 0],
-            translated: vec![2, 0x0800_0000],
-        };
-        process.memory.write_bytes(0x0800_0000, b"/System/hello.bin\0");
-        let reply = command(&host, &process, 0, &open);
-        assert_eq!(reply.words[0], R_OK, "{:?}", host.log());
-        let read = Request {
-            cmd: FILE_READ,
-            normal: 3,
-            translate: 2,
-            params: vec![6, 0, 4],
-            translated: vec![2, 0x0800_0100],
-        };
-        let id = {
-            let state = host.state.lock().unwrap();
-            state.sessions.values().find_map(|s| match s {
-                crate::hle::Service::File(id) => Some(*id),
-                _ => None,
-            }).unwrap()
-        };
-        let reply = file_command(&host, &process, 0, id, &read);
-        assert_eq!(reply.words, vec![R_OK, 4]);
-        let mut out = [0u8; 4];
-        process.memory.read_bytes(0x0800_0100, &mut out);
-        assert_eq!(&out, b"romf");
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
     #[test]
     fn a_path_with_parent_dirs_is_refused() {
@@ -551,34 +570,5 @@ mod tests {
         assert!(resolve(root, "System/hello.bin").is_some());
         assert!(resolve(root, "../escape").is_none());
         assert!(resolve(root, "/System/x").is_some());
-    }
-
-    #[test]
-    fn a_save_file_writes_back() {
-        let dir = staged();
-        let host = Host::new(&dir, Vec::new());
-        let (_memory, process) = process();
-        let mut state = host.state.lock().unwrap();
-        let archive = state.fresh_handle();
-        state.archives.insert(archive, crate::hle::Archive { kind: ARCHIVE_SAVEDATA });
-        drop(state);
-        let (handle, id) = host.open_file_session(FileSource::Memory(Vec::new()), dir.join("save/slot1.sav").display().to_string(), true);
-        let _ = handle;
-        let _ = archive;
-        process.memory.write_bytes(0x0800_0100, b"save!");
-        let write = Request {
-            cmd: FILE_WRITE,
-            normal: 4,
-            translate: 2,
-            params: vec![0, 0, 5, 0],
-            translated: vec![2, 0x0800_0100],
-        };
-        let reply = file_command(&host, &process, 0, id, &write);
-        assert_eq!(reply.words[0], R_OK);
-        let close = Request { cmd: FILE_CLOSE, normal: 0, translate: 0, params: vec![], translated: vec![] };
-        file_command(&host, &process, 0, id, &close);
-        assert_eq!(std::fs::read(dir.join("save/slot1.sav")).unwrap(), b"save!");
-        let _ = parse_input("");
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

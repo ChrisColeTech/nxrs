@@ -13,11 +13,9 @@ pub const ENABLE_NOTIFICATION: u32 = 0x0002;
 pub const REGISTER_CLIENT: u32 = 0x0001;
 /// SRV:IsServiceRegistered
 pub const IS_SERVICE_REGISTERED: u32 = 0x000E;
-/// SRV:UnregisterService
-pub const UNREGISTER_SERVICE: u32 = 0x0004;
 
 /// the 8-byte UTF-8 name in request words 1-2 (the caller's `params[0..2]`), NUL-terminated
-fn name_of(request: &Request) -> String {
+pub fn name_of(request: &Request) -> String {
     let mut bytes = Vec::new();
     for word in request.params.iter().take(2) {
         for byte in word.to_le_bytes() {
@@ -32,17 +30,22 @@ fn name_of(request: &Request) -> String {
 
 pub fn command(
     host: &Host,
-    _process: &Process3ds,
+    process: &Process3ds,
     _tls: u32,
     _session: u32,
     request: &Request,
 ) -> Reply {
     match request.cmd {
-        ENABLE_NOTIFICATION => Reply::ok(),
-        REGISTER_CLIENT => {
-            // response: result, translate descriptor 0 + a notification handle (the SDK stores it)
-            Reply::new(vec![R_OK, 0, 0], 2)
+        ENABLE_NOTIFICATION => {
+            // 3dbrew SRV:EnableNotification, response 0x00020042: result, copy-handle
+            // descriptor 0, the notification semaphore. Headless nothing is ever published, so
+            // the semaphore stays at zero; a wait on it parks like on hardware.
+            let semaphore = host.srv_semaphore(process);
+            host.say(format!("srv: EnableNotification -> semaphore {semaphore:#x}"));
+            Reply::new(vec![R_OK, 0, semaphore], 2)
         }
+        // 3dbrew SRV:RegisterClient, response 0x00010040: the result only
+        REGISTER_CLIENT => Reply::ok(),
         GET_SERVICE_HANDLE => {
             let name = name_of(request);
             match host.connect(&name) {
@@ -58,7 +61,6 @@ pub fn command(
             let known = host.service_known(&name);
             Reply::new(vec![R_OK, known as u32], 0)
         }
-        UNREGISTER_SERVICE => Reply::ok(),
         other => {
             host.gap(format!("srv: command {other:#010x} not implemented"));
             Reply::err(R_INVALID_CMD)
@@ -66,8 +68,14 @@ pub fn command(
     }
 }
 
-/// err:f: ErrDisp accepts a Throw and returns; SetUserString/other handshakes are answered so a
-/// title that reports a handled error does not wedge
+/// err:f Throw (3dbrew `ERR:Throw`, 0x00010800): the 0x80-byte fatal-error record
+pub const ERRF_THROW: u32 = 0x0001;
+/// err:f SetUserString (0x00020042)
+pub const ERRF_SET_USER_STRING: u32 = 0x0002;
+
+/// err:f: ErrDisp. A Throw is the title reporting a fatal error: ErrDisp shows it and the
+/// title stops. Headless the record is put in the gap ledger (type, result, pc) and the reply
+/// returns, so the trace shows exactly what the title considered fatal.
 pub fn errf_command(
     host: &Host,
     _process: &Process3ds,
@@ -75,17 +83,23 @@ pub fn errf_command(
     request: &Request,
 ) -> Reply {
     match request.cmd {
-        // Throw / SetUserString / ... (the command numbers behind 0x00010040 etc.)
-        0x0001 | 0x0002 | 0x0003 | 0x0004 => {
-            host.say(format!(
-                "err:f command {:#06x} params {:08x?}",
-                request.cmd, request.params
+        ERRF_THROW => {
+            // record word 0 low byte = type, word 1 = result, word 3 = pc (3dbrew ERR:Throw)
+            let kind = request.word(0) & 0xFF;
+            let result = request.word(1);
+            let pc = request.word(3);
+            host.gap(format!(
+                "err:f Throw: type {kind}, result {result:#010x}, pc {pc:#x} (the title reported a fatal error)"
             ));
+            Reply::ok()
+        }
+        ERRF_SET_USER_STRING => {
+            host.say("err:f: SetUserString".to_owned());
             Reply::ok()
         }
         other => {
             host.gap(format!("err:f: command {other:#010x} not implemented"));
-            Reply::ok()
+            Reply::err(R_INVALID_CMD)
         }
     }
 }

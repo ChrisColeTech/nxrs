@@ -31,6 +31,42 @@ pub const R_INVALID_ARCHIVE: u32 = 0xC880_4476;
 /// the client id this process presents to GSP/HID (the first slot)
 pub const CLIENT_ID: u32 = 0;
 
+/// the display frame the HID/GSP clock runs at (the 3DS LCDs refresh at ~59.8 Hz)
+pub const FRAME_MS: u64 = 16;
+/// GSP interrupt ids (3dbrew `GSP Shared Memory`: PSC0 0, PSC1 1, VBlank0 2, VBlank1 3, PPF 4,
+/// P3D 5, DMA 6)
+pub const GSP_VBLANK0: u8 = 2;
+pub const GSP_VBLANK1: u8 = 3;
+/// the interrupt relay queue's entry count (0x34 one-byte entries from +0xC)
+pub const GSP_QUEUE_ENTRIES: u32 = 0x34;
+
+/// pushes one interrupt id into a client's GSP interrupt relay queue (3dbrew `GSP Shared
+/// Memory`: header byte 0 = index of the first pending entry, byte 1 = pending count, byte 2 =
+/// missed flag; entries are bytes from +0xC). A full queue sets the missed flag.
+pub fn push_interrupt(process: &Process3ds, queue: u32, id: u8) {
+    let memory = &process.memory;
+    let first = memory.read8(queue) as u32;
+    let count = memory.read8(queue + 1) as u32;
+    if count >= GSP_QUEUE_ENTRIES {
+        memory.write8(queue + 2, 1);
+        return;
+    }
+    let slot = (first + count) % GSP_QUEUE_ENTRIES;
+    memory.write8(queue + 0xC + slot, id);
+    memory.write8(queue + 1, (count + 1) as u8);
+}
+
+/// a HID section header: latest tick at 0x0, previous tick at 0x8, latest index at 0x10
+fn write_section_header(process: &Process3ds, section: u32, tick: u64, index: u32) {
+    let memory = &process.memory;
+    let previous = (memory.read32(section) as u64) | ((memory.read32(section + 4) as u64) << 32);
+    memory.write32(section + 0x8, previous as u32);
+    memory.write32(section + 0xC, (previous >> 32) as u32);
+    memory.write32(section, tick as u32);
+    memory.write32(section + 0x4, (tick >> 32) as u32);
+    memory.write32(section + 0x10, index);
+}
+
 /// the service behind a session handle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {
@@ -120,6 +156,10 @@ impl FileSource {
             FileSource::Memory(bytes) => bytes.len() as u64,
             FileSource::Image { size, .. } => *size,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// up to `len` bytes at `offset`; an image read seeks the dump
@@ -221,6 +261,10 @@ pub struct State {
     pub hid_shared: Option<u32>,
     /// the APT lock handle (a service-owned sync object, see kernel.rs)
     pub apt_lock: Option<u32>,
+    /// the APT parameter event (Initialize's second handle), signaled while a parameter waits
+    pub apt_parameter_event: Option<u32>,
+    /// srv's notification semaphore (EnableNotification), one per process
+    pub srv_semaphore: Option<u32>,
 }
 
 impl State {
@@ -240,6 +284,8 @@ impl State {
             gsp_shared: None,
             hid_shared: None,
             apt_lock: None,
+            apt_parameter_event: None,
+            srv_semaphore: None,
         }
     }
 
@@ -269,19 +315,13 @@ pub struct InputStep {
 }
 
 /// the pad state the HID service serves
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PadState {
     pub buttons: u32,
     pub cx: i16,
     pub cy: i16,
     pub touch: Option<(u16, u16)>,
     pub tick: u64,
-}
-
-impl Default for PadState {
-    fn default() -> PadState {
-        PadState { buttons: 0, cx: 0, cy: 0, touch: None, tick: 0 }
-    }
 }
 
 /// the scripted input feed: steps by wall-clock ms from the boot start; each applied step is
@@ -362,7 +402,8 @@ pub fn parse_keys(spec: &str) -> Result<(u32, i16, i16, Option<(u16, u16)>), Str
     if spec.eq_ignore_ascii_case("neutral") || spec.eq_ignore_ascii_case("none") || spec.is_empty() {
         return Ok((0, 0, 0, None));
     }
-    for key in spec.split(['+', ',', ' ']).filter(|k| !k.is_empty()) {
+    // `,` belongs to the touch:x,y / circle:x,y coordinates, so it does not separate keys
+    for key in spec.split(['+', ' ']).filter(|k| !k.is_empty()) {
         let lower = key.to_ascii_lowercase();
         let bit = match lower.as_str() {
             "a" => 0,
@@ -460,6 +501,10 @@ pub struct Host {
     pub gsp_event: AtomicU32,
     pub hid_event: AtomicU32,
     pub frames: AtomicU64,
+    /// VBlank pairs pushed into the GSP interrupt relay queue
+    pub vblanks: AtomicU64,
+    /// the HID rings' latest entry index
+    hid_index: AtomicU32,
     last_buttons: AtomicU64,
     /// the guest thread index of the last SendSyncRequest (APT's lock ownership needs it)
     pub caller_thread: AtomicUsize,
@@ -494,6 +539,9 @@ impl Host {
             gsp_event: AtomicU32::new(0),
             hid_event: AtomicU32::new(0),
             frames: AtomicU64::new(0),
+            vblanks: AtomicU64::new(0),
+            // the first published entry is index 0
+            hid_index: AtomicU32::new(7),
             last_buttons: AtomicU64::new(0),
             caller_thread: AtomicUsize::new(0),
             romfs_image: Mutex::new(None),
@@ -641,15 +689,28 @@ impl Host {
         true
     }
 
-    /// the input thread: applies the script by wall time, writes the HID shared memory and signals
-    /// the HID/GSP events so the title's wait/poll loop advances
+    /// the srv notification semaphore, created once (EnableNotification hands it out)
+    pub fn srv_semaphore(&self, process: &Process3ds) -> u32 {
+        let mut state = self.state.lock().unwrap();
+        if let Some(semaphore) = state.srv_semaphore {
+            return semaphore;
+        }
+        let semaphore = process.create_semaphore(0, 64);
+        state.srv_semaphore = Some(semaphore);
+        semaphore
+    }
+
+    /// the frame clock: every `FRAME_MS` the HID service publishes a new PAD/touch entry (and
+    /// signals its PAD event) and the GSP pushes VBlank0/VBlank1 into the interrupt relay queue
+    /// (and signals the queue's event), as the hardware's 60 Hz display refresh does. The script
+    /// advances on wall time from the boot start.
     pub fn start_input(self: &Arc<Self>) {
         if self.input_running.swap(true, Ordering::SeqCst) {
             return;
         }
         let host = Arc::clone(self);
         std::thread::Builder::new()
-            .name("os3ds-input".into())
+            .name("os3ds-frame".into())
             .spawn(move || loop {
                 let process = host.process.load(Ordering::Acquire);
                 if process != 0 {
@@ -658,24 +719,32 @@ impl Host {
                     if process.stopped() {
                         break;
                     }
-                    let elapsed = host.elapsed_ms();
-                    let changed = host.input.lock().unwrap().advance(elapsed);
-                    if changed {
-                        host.write_pad(process);
-                    }
-                    // signal the HID update and the GSP "vblank" events every 16 ms
-                    let hid_event = host.hid_event.load(Ordering::Relaxed);
-                    if changed && hid_event != 0 {
-                        process.signal_event(hid_event);
-                    }
-                    let gsp_event = host.gsp_event.load(Ordering::Relaxed);
-                    if gsp_event != 0 && elapsed % 16 == 0 {
-                        process.signal_event(gsp_event);
-                    }
+                    host.frame(process);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(4));
+                std::thread::sleep(std::time::Duration::from_millis(FRAME_MS));
             })
             .ok();
+    }
+
+    /// one display frame: the script step, the HID entry, the VBlank interrupts
+    pub fn frame(&self, process: &Process3ds) {
+        let elapsed = self.elapsed_ms();
+        self.input.lock().unwrap().advance(elapsed);
+        if self.write_pad(process) {
+            let hid_event = self.hid_event.load(Ordering::Acquire);
+            if hid_event != 0 {
+                process.signal_event(hid_event);
+            }
+        }
+        let gsp = self.gsp_address.load(Ordering::Acquire);
+        let gsp_event = self.gsp_event.load(Ordering::Acquire);
+        if gsp != 0 && gsp_event != 0 {
+            push_interrupt(process, gsp + CLIENT_ID * 0x40, GSP_VBLANK0);
+            push_interrupt(process, gsp + CLIENT_ID * 0x40, GSP_VBLANK1);
+            process.signal_event(gsp_event);
+            self.vblanks.fetch_add(1, Ordering::Relaxed);
+        }
+        self.frames.fetch_add(1, Ordering::Relaxed);
     }
 
     /// attaches the process for the input thread (raw pointer; the boot outlives the thread)
@@ -683,37 +752,48 @@ impl Host {
         self.process.store(process as usize, Ordering::Release);
     }
 
-    /// writes the current pad state into the HID shared memory the guest mapped
-    pub fn write_pad(&self, process: &Process3ds) {
+    /// publishes the current pad state as the next entry of the HID shared memory's PAD and
+    /// touch rings (3dbrew `HID Shared Memory`): the section header's tick/previous tick (0x0/0x8)
+    /// and latest index (0x10), the raw PAD state (0x1C) and circle pad (0x20), the 8 PAD
+    /// entries at 0x28 (0x10 each: held, pressed, released, circle pad); touch at 0xA8 with the
+    /// same header, raw at +0x18 and 8 entries of 8 bytes at +0x20 (x, y, valid). Says whether
+    /// the guest has the block mapped.
+    pub fn write_pad(&self, process: &Process3ds) -> bool {
         let address = self.hid_address.load(Ordering::Acquire);
         if address == 0 {
-            return;
+            return false;
         }
         let pad = self.input.lock().unwrap().now;
         let memory = &process.memory;
-        // current PAD state at 0x1C, raw circle pad at 0x20, and the 8-entry array at 0x28
-        memory.write32(address + 0x18, 0); // 3D slider f32 0.0
-        memory.write32(address + 0x1C, pad.buttons);
-        memory.write32(address + 0x20, (pad.cx as u16 as u32) | ((pad.cy as u16 as u32) << 16));
-        // entry 0: current, pressed, released, circle pad
+        let tick = self.elapsed_ticks();
+        let circle = (pad.cx as u16 as u32) | ((pad.cy as u16 as u32) << 16);
         let previous_buttons = self.last_buttons.swap(pad.buttons as u64, Ordering::AcqRel) as u32;
         let pressed = pad.buttons & !previous_buttons;
         let released = previous_buttons & !pad.buttons;
-        memory.write32(address + 0x28, pad.buttons);
-        memory.write32(address + 0x2C, pressed);
-        memory.write32(address + 0x30, released);
-        memory.write32(
-            address + 0x34,
-            (pad.cx as u16 as u32) | ((pad.cy as u16 as u32) << 16),
-        );
-        // touch: raw entry at 0xA8+0x18 and pixel entries at 0xA8+0x20
+        let index = self.hid_index.fetch_add(1, Ordering::AcqRel).wrapping_add(1) % 8;
+        let entry = address + 0x28 + index * 0x10;
+        memory.write32(entry, pad.buttons);
+        memory.write32(entry + 0x4, pressed);
+        memory.write32(entry + 0x8, released);
+        memory.write32(entry + 0xC, circle);
+        memory.write32(address + 0x1C, pad.buttons);
+        memory.write32(address + 0x20, circle);
+        write_section_header(process, address, tick, index);
         let (x, y, present) = pad.touch.map(|(x, y)| (x, y, 1u32)).unwrap_or((0, 0, 0));
-        memory.write32(address + 0xA8 + 0x18, (x as u32) | ((y as u32) << 16));
-        memory.write32(address + 0xA8 + 0x20, (x as u32) | ((y as u32) << 16));
-        memory.write32(address + 0xA8 + 0x24, present);
-        let mut input = self.input.lock().unwrap();
-        input.updates += 1;
-        self.frames.fetch_add(1, Ordering::Relaxed);
+        let touch = address + 0xA8;
+        let xy = (x as u32) | ((y as u32) << 16);
+        memory.write32(touch + 0x20 + index * 8, xy);
+        memory.write32(touch + 0x24 + index * 8, present);
+        memory.write32(touch + 0x18, xy);
+        memory.write32(touch + 0x1C, present);
+        write_section_header(process, touch, tick, index);
+        self.input.lock().unwrap().updates += 1;
+        true
+    }
+
+    /// the ARM11 tick count since the boot (268,111,856 Hz), the HID entries' timestamps
+    pub fn elapsed_ticks(&self) -> u64 {
+        (self.began.elapsed().as_nanos() as u64).saturating_mul(268) / 1000
     }
 
     /// the serve counter: every read of the HID shared memory the service accounts for
@@ -876,8 +956,8 @@ mod tests {
     #[test]
     fn the_script_advances_by_wall_time() {
         let mut script = InputScript::new(parse_input("0 neutral\n100 a\n200 start\n").unwrap());
-        assert!(!script.advance(0) || script.cursor == 1);
-        assert!(script.advance(99));
+        assert!(script.advance(0), "the 0 ms step applies at once");
+        assert!(!script.advance(99), "nothing is due before 100 ms");
         assert_eq!(script.now.buttons, 0);
         assert!(script.advance(150));
         assert_eq!(script.now.buttons, 1 << 0);
