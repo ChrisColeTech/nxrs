@@ -15,7 +15,10 @@
 //! writes but the GPU only reads stay mirrored by default (`wb_frames`): DIRECT-MEM measured that per-draw constant
 //! pools read over PCIe cost more GPU time than their sync saved (MKW +3.3 ms a frame).
 //!
-//! `NXGFX_HOST_HOT=0`: no pool switches (every pool stays as placed). `NXGFX_HOST_HOT_FRAMES` (32), `_WB_FRAMES` (16),
+//! OoT's are whole pools of 6-15 MB (flags 0x24, CPU and GPU cached, as 3.3 GB of its other pools: the flags cannot
+//! tell them apart), several of them written every other frame (double-buffered): hence 24 of 64, not a majority.
+//!
+//! `NXGFX_HOST_HOT=0`: no pool switches (every pool stays as placed). `NXGFX_HOST_HOT_FRAMES` (24), `_WB_FRAMES` (16),
 //! `_CPU_KB` (256), `_MIN_KB` (1024), `_MAX_MB` (256): the thresholds. Each switch and each refusal is logged.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +37,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Rule {
-        Rule { cpu_frames: 32, wb_frames: 16, cpu_kb: 256, min_kb: 1024, max_mb: 256 }
+        Rule { cpu_frames: 24, wb_frames: 16, cpu_kb: 256, min_kb: 1024, max_mb: 256 }
     }
 }
 
