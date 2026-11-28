@@ -135,7 +135,14 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
             }
         } else {
             // uncovered code: the interpreter runs until it reaches an entry or the budget ends
-            process.note_interp(state.ctx.r[15]);
+            let first = process.note_interp(state.ctx.r[15]);
+            let total = process.interp_total();
+            if first || total <= 12 || total % 1000 == 0 {
+                process.say(format!(
+                    "interpreter entry {total} at {:#x}: r0 {:#x} r1 {:#x} r2 {:#x} r3 {:#x} lr {:#x}",
+                    state.ctx.r[15], state.ctx.r[0], state.ctx.r[1], state.ctx.r[2], state.ctx.r[3], state.ctx.r[14]
+                ));
+            }
             let mut miss_log = process.miss_log();
             let lookup = |address: u32| process.library.lock().unwrap().lookup(address);
             let mut sink = |c: &mut Context, number: u32| {

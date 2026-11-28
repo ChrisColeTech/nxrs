@@ -183,6 +183,8 @@ pub struct BootReport {
     /// the ticks the code answered itself (the fast path working)
     pub ticks_answered_in_place: u64,
     pub faults: u64,
+    /// the last address that faulted (the first suspect when faults are high)
+    pub last_fault: u32,
     pub mmio_reads: u64,
     pub mmio_writes: u64,
     pub watched_writes: u64,
@@ -249,6 +251,9 @@ impl Process3ds {
                 .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
+                // the pages are committed and the tables filled now: the generated code hits
+                // them directly instead of faulting through the callbacks page by page
+                self.memory.populate(current as u32, size as u32);
                 return Some(current as u32);
             }
         }
@@ -311,17 +316,23 @@ impl Process3ds {
         log.push((number, result, 1));
     }
 
-    /// notes an interpreter block start (the uncovered code's address)
-    pub fn note_interp(&self, address: u32) {
+    /// notes an interpreter block start; says whether it was the first time
+    pub fn note_interp(&self, address: u32) -> bool {
         self.recorder.hint(address);
         let mut log = self.interp_starts.lock().unwrap();
         for (known, count) in log.iter_mut() {
             if *known == address {
                 *count += 1;
-                return;
+                return false;
             }
         }
         log.push((address, 1));
+        true
+    }
+
+    /// how many interpreter blocks have started (all sites, all times)
+    pub fn interp_total(&self) -> u64 {
+        self.interp_starts.lock().unwrap().iter().map(|&(_, count)| count).sum()
     }
 
     /// the wait a thread's kernel record names, if any (a running thread is not waiting)
@@ -848,6 +859,7 @@ impl Process3ds {
             threads_ran: self.threads_ran(),
             ticks_answered_in_place: self.stats.ticks_answered_in_place.load(Ordering::Relaxed),
             faults: stats.faults,
+            last_fault: stats.last_fault,
             mmio_reads: stats.mmio_reads,
             mmio_writes: stats.mmio_writes,
             watched_writes: stats.watched_writes,

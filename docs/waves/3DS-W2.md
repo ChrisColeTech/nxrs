@@ -221,3 +221,67 @@ those targets as funcs; named services then carry the title to its thread creati
 the join in `start`); the containing-function lookup experiment was reverted, not shipped. No files
 outside the unit were changed.
 
+## Send-back: the page-table faults (fault diagnosis, fix, new numbers)
+
+The lead read the first boot's 25.5M faults in a 10.3M-tick window and called it a page-table bug in
+this unit. It was partly that. `Memory::ensure_commit` filled `read_pages`/`write_pages` for all
+16 pages of a 64 KiB group with the **touching** region's permissions, and only when the group was
+first committed; a group already committed by a neighbour returned without filling the current
+region's pages, and the new LINEAR range from `ControlMemory` (addr0 = 0) was never populated at
+all — the generated code went through the callbacks for every word until a page happened to commit.
+The fix:
+
+- `ensure_commit` now fills each page of the group from the region that actually owns it
+  (`covers_page`), leaving unowned pages null; read-only and VRAM pages keep a null `write_pages`
+  entry (the only place the ABI wants host-visible writes).
+- `Memory::commit` (svc COMMIT/LINEAR) and `Memory::populate` commit every page of the range and
+  fill both tables; `Process3ds::alloc_linear` calls `populate` for the address it hands back.
+- Regression test `mem::tests::control_memory_commits_fill_the_tables`: LINEAR range committed,
+  reads zero before the write, a store/load through the same address leaves `faults` unchanged,
+  write entries are non-null, and `QueryMemory` matches the mapping; then RESERVE → COMMIT the same
+  range, state changes in place and the tables fill.
+- `differential.rs` gains `the_memclr_loop_agrees`: the Sonic loop shape (two 4-register `stm`
+  stores per 32 bytes) over a page committed through the svc path, interpreter vs recompiled, final
+  r0/r1/r2/r3/r12/lr and carry plus 72 heap words compared: 0 mismatches, no faults after the
+  commit.
+
+Numbers, same Sonic boot and 20 s wall cap:
+
+| | before | after |
+|---|---|---|
+| ticks | 10.3M | 9.8M |
+| interpreted | 9.98M | 8.99M |
+| faults | 25 529 520 | 9 726 128 |
+| faults/tick | 2.48 | 0.99 |
+| interpreted/s | 0.499M | 0.450M |
+
+The fault hypothesis is therefore **confirmed only for the page-table half**: the noise from
+ordinary accesses inside the committed LINEAR range is gone. The remaining faults are not page-table
+misses. `last_fault` is `0x0`, and the interpreter-entry log shows the real shape:
+
+```
+interpreter entry 1 at 0x336854: r0 0x1400f7f0 r1 0x100c80 r2 0x0 r3 0x0 lr 0x0
+interpreter entry 2 at 0x336854: r0 0x1400f8b0 r1 0x100c80 ...
+interpreter entry 1000 at 0x336854: r0 0x17e388b0 r1 0x100c80 ...
+interpreter entry 2000 at 0x336854: r0 0x1bc818b0 r1 0x100c80 ...
+```
+
+The title is doing a legitimate 1 MiB memclr (`r1 = 0x100C80`) at `0x1400F7F0`, then the next one
+~0x10000 further, ~2200 times across the 0x14000000 LINEAR window. It calls the memclr at
+`0x00336854`; the entry tables only have `0x00336850`/`0x0033683C` for that code (discovery merged
+the variants), so the interpreter starts mid-function with `lr = 0`. The loop itself runs, but its
+shared epilogue restores `lr` from a stack frame the missing prologue never made, returns to
+address 0, and the interpreter then fetches zeros (one fault per fetch) — that is the residual
+9.7M and why `last_fault` is 0. It is not a page-table miss and not fixed by mapping more memory.
+
+This is the W2/W3 boundary the send-back asked for, with the exact site: `0x00336854`, the
+libctru memclr entry, `r0 ∈ 0x1400F7F0…0x1BC818B0`, `r1 = 0x100C80`, `lr = 0`. Seeding
+`0x00336854` in `discovered.tsv` is refused by `hints::new_functions` because the address is owned
+as an instruction of the 0x336850 function; that is a translator3ds discovery/hints boundary, not
+this unit. With 0x336854 unhinted the clear runs interpreted and the budget ends before
+`CreateThread`; no thread handles exist to log. Re-running with the containing-function lookup was
+explicitly not resurrected.
+
+After the fix the same suites are green (`cargo test -p runtime3ds` 23+2+2+13, differential 2
+tests; `--workspace --exclude renhdrum` green).
+

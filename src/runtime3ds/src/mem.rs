@@ -198,8 +198,10 @@ impl Memory {
     }
 
     /// svcControlMemory COMMIT: a range already held by one mapping changes state/perm in place
-    /// (the title committing pages of its reserved heap), otherwise it becomes a fresh mapping
+    /// (the title committing pages of its reserved heap), otherwise it becomes a fresh mapping;
+    /// the pages are committed and the tables filled for the range (not just on first touch)
     pub fn commit(&self, base: u32, size: u32, perm: Perm, state: State, kind: Kind) -> Result<(), String> {
+        let mut covered = false;
         if size != 0 {
             let end = base.wrapping_add(size - 1);
             let mut inner = self.inner.lock().unwrap();
@@ -211,10 +213,28 @@ impl Memory {
                 region.perm = perm;
                 region.state = state;
                 region.kind = kind;
-                return Ok(());
+                covered = true;
             }
         }
-        self.map(base, size, perm, state, kind)
+        if !covered {
+            self.map(base, size, perm, state, kind)?;
+        }
+        self.populate(base, size);
+        Ok(())
+    }
+
+    /// commits every page of a mapped range and fills the tables for it; the generated code
+    /// then reads/writes the pages directly instead of going through the host callbacks
+    pub fn populate(&self, base: u32, size: u32) {
+        if size == 0 {
+            return;
+        }
+        let end = base.wrapping_add(size);
+        let mut page = base & !(PAGE - 1);
+        while page < end {
+            self.ensure_commit(page);
+            page = page.wrapping_add(PAGE);
+        }
     }
 
     /// unmaps; empties the tables' entries for it (legal from svc, the boundary the ABI names)
@@ -289,27 +309,32 @@ impl Memory {
             return Some(region);
         }
         let group = address / PAGE / GROUP_PAGES;
-        if inner.committed.contains(&group) {
-            return Some(region);
-        }
         let first = group * GROUP_PAGES;
         // safe: the group is inside the reservation; committing makes the pages real
         let group_base = unsafe { self.base.add(first as usize * PAGE as usize) };
-        if windows_commit(group_base, (GROUP_PAGES * PAGE) as usize).is_none() {
-            inner.stats.faults += 1;
-            
-            return Some(region);
-        }
-        for page in first..first + GROUP_PAGES {
-            let entry = unsafe { group_base.add((page - first) as usize * PAGE as usize) };
-            let tables = unsafe { &mut *self.tables.get() };
-            tables.read[page as usize] = entry;
-            if region.perm.writable() && region.kind != Kind::Vram {
-                tables.write[page as usize] = entry;
+        if !inner.committed.contains(&group) {
+            if windows_commit(group_base, (GROUP_PAGES * PAGE) as usize).is_none() {
+                inner.stats.faults += 1;
+                return Some(region);
             }
+            inner.committed.insert(group);
+            inner.stats.committed_groups += 1;
         }
-        inner.committed.insert(group);
-        inner.stats.committed_groups += 1;
+        // fill each page the group holds according to the region that owns it; a page no region
+        // owns stays null, and a read-only or GPU-watched page has no write entry
+        let tables = unsafe { &mut *self.tables.get() };
+        for page in first..first + GROUP_PAGES {
+            let Some(owner) = inner.regions.iter().find(|r| r.covers_page(page)) else {
+                continue;
+            };
+            let entry = unsafe { group_base.add((page - first) as usize * PAGE as usize) };
+            tables.read[page as usize] = entry;
+            tables.write[page as usize] = if owner.perm.writable() && owner.kind != Kind::Vram {
+                entry
+            } else {
+                std::ptr::null_mut()
+            };
+        }
         Some(region)
     }
 
@@ -526,6 +551,39 @@ mod tests {
         mem.write32(0x1000_3FF0, 0xC0FFEE11);
         assert_eq!(mem.read32(0x1000_3FF0), 0xC0FFEE11);
         assert!(mem.stats().committed_groups >= 1);
+    }
+
+    /// RESERVE then COMMIT/LINEAR fills both tables for the range: a guest store/load through the
+    /// pages never visits the callbacks, reads are zero before the write, QueryMemory matches
+    #[test]
+    fn control_memory_commits_fill_the_tables() {
+        let mem = Memory::new().unwrap();
+        // the boot maps the LINEAR window; ControlMemory picks a range inside it
+        mem.map(0x1400_0000, 0x0800_0000, Perm::Rw, State::Continuous, Kind::Linear).unwrap();
+        let (base, size) = (0x1400_0000, 0x10_0000);
+        mem.commit(base, size, Perm::Rw, State::Continuous, Kind::Linear).unwrap();
+        assert!(!mem.read_entry(base / PAGE).is_null());
+        assert!(!mem.write_entry(base / PAGE).is_null(), "an ordinary page has a write entry");
+        assert_eq!(mem.read32(base), 0, "fresh committed pages read zero");
+        let faults = mem.stats().faults;
+        mem.write32(base + 0x1234, 0xDEAD_BEEF);
+        assert_eq!(mem.read32(base + 0x1234), 0xDEAD_BEEF);
+        assert_eq!(mem.stats().faults, faults, "the populated page tables take the access");
+        let info = mem.query(base + 0x1000);
+        assert_eq!(info.base, base);
+        assert_eq!((info.perm, info.state), (Perm::Rw, State::Continuous));
+
+        // RESERVE in free space then COMMIT the same range: state changes in place, tables fill
+        mem.map(0x2000_0000, 0x1_0000, Perm::Rw, State::Reserved, Kind::Heap).unwrap();
+        assert_eq!(mem.query(0x2000_0000).state, State::Reserved);
+        mem.commit(0x2000_0000, 0x1_0000, Perm::Rw, State::Private, Kind::Heap).unwrap();
+        assert!(!mem.read_entry(0x2000_0000 / PAGE).is_null());
+        assert!(!mem.write_entry(0x2000_0000 / PAGE).is_null());
+        let faults = mem.stats().faults;
+        mem.write32(0x2000_0000, 0x1122_3344);
+        assert_eq!(mem.read32(0x2000_0000), 0x1122_3344);
+        assert_eq!(mem.stats().faults, faults);
+        assert_eq!(mem.query(0x2000_0000).state, State::Private);
     }
 
     /// an access outside every region faults, answers 0 and counts

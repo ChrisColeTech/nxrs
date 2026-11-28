@@ -192,8 +192,8 @@ fn run(dump: &std::path::Path, out: &std::path::Path, dll: Option<String>, slice
         report.svcs, report.ticks_answered_in_place, report.gaps.len(), report.cache_ops
     ));
     log.push_str(&format!(
-        "misses {} at {} sites\nfaults {} mmio reads {} writes {} watched writes {}\n",
-        report.misses, report.miss_sites, report.faults, report.mmio_reads, report.mmio_writes, report.watched_writes
+        "misses {} at {} sites\nfaults {} (last {:#x}) mmio reads {} writes {} watched writes {}\n",
+        report.misses, report.miss_sites, report.faults, report.last_fault, report.mmio_reads, report.mmio_writes, report.watched_writes
     ));
     log.push_str(&format!("threads that ran: {}\n", report.threads_ran));
     for (number, result, count) in &report.svcs_seen {

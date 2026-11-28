@@ -39,6 +39,20 @@ const WORDS: [u32; 19] = [
     0xEF00_0003, // svc 0x03: ExitProcess
 ];
 
+/// the hot-loop shape Sonic's libctru memclr uses: four-register stores over a committed page
+const WORDS_CLEAR: [u32; 10] = [
+    0xE3A0_1C01, // mov r1, #0x100
+    0xE3A0_2000, // mov r2, #0
+    0xE3A0_3000, // mov r3, #0
+    0xE3A0_C000, // mov r12, #0
+    0xE3A0_E000, // mov lr, #0
+    0xE8A0_500C, // stmia r0!, {r2, r3, r12, lr}
+    0xE8A0_500C, // stmia r0!, {r2, r3, r12, lr}
+    0xE251_1020, // subs r1, r1, #32
+    0x2AFF_FFFB, // bhs the stores
+    0xEF00_0003, // svc 0x03
+];
+
 fn bare_context(memory: &Memory, vfp: &mut [u32; 32], fpscr: &mut u32) -> Box<Context> {
     Box::new(Context {
         r: [0; 16],
@@ -112,6 +126,7 @@ fn interpreted(memory: &Arc<Memory>) -> (Box<Context>, Box<[u32; 32]>, u32) {
         let plain = ctx.r[15];
         match interp::step(&mut ctx, memory, plain, &mut log, &mut sink) {
             interp::Step::Next => ctx.r[15] = plain + if ctx.thumb != 0 { 2 } else { 4 },
+            interp::Step::Taken => {}
             interp::Step::Svc(_) => break,
             other => panic!("the differential's window got {other:?} at {plain:#x}"),
         }
@@ -202,4 +217,64 @@ fn the_interpreter_and_the_recompiled_code_agree() {
         eprintln!("mismatch memory heap+4");
     }
     assert_eq!(mismatches, 0, "the two sides must agree on the tested classes");
+}
+
+/// the memclr loop over committed pages: interpreter and recompiled store the same zeros, leave
+/// the same registers/flags, and every access goes through populated page tables (no faults)
+#[test]
+fn the_memclr_loop_agrees() {
+    let Some((library, _path, _dump, title)) = loaded_library("differential-clear", &WORDS_CLEAR) else {
+        eprintln!("skipping: NXRS_3DS_CC_TESTS is off, the compile lane did not run");
+        return;
+    };
+    let code_bytes = title.code().unwrap();
+    let memory = test_memory(&code_bytes);
+    for i in 0..72u32 {
+        memory.write32(HEAP + i * 4, 0xAAAA_AAAA);
+    }
+    let (interp_ctx, _vfp, _fpscr) = interpreted(&memory);
+
+    let memory2 = Arc::new(Memory::new().unwrap());
+    memory2
+        .map(BASE, code_bytes.len().next_multiple_of(0x1000) as u32, Perm::R, State::Code, Kind::Exe)
+        .unwrap();
+    for (i, word) in WORDS_CLEAR.iter().enumerate() {
+        memory2.load_bytes(BASE + i as u32 * 4, &word.to_le_bytes());
+    }
+    memory2.map(HEAP, 0x1000, Perm::Rw, State::Private, Kind::Heap).unwrap();
+    // the svc COMMIT path the title uses: the page tables hold the heap pages before the loop
+    memory2.commit(HEAP, 0x1000, Perm::Rw, State::Private, Kind::Heap).unwrap();
+    for i in 0..72u32 {
+        memory2.write32(HEAP + i * 4, 0xAAAA_AAAA);
+    }
+    let faults_before = memory2.stats().faults;
+    let (process, state) = recompiled(memory2.clone(), library);
+    let report = process.report(PROGRAM_ID, String::new());
+    assert!(report.recompiled > 0, "the recompiled C ran the loop");
+
+    let mut mismatches = 0;
+    for r in [0usize, 1, 2, 3, 12, 14] {
+        if interp_ctx.r[r] != state.ctx.r[r] {
+            mismatches += 1;
+            eprintln!("mismatch r{r}: interp {:#x}, recompiled {:#x}", interp_ctx.r[r], state.ctx.r[r]);
+        }
+    }
+    if interp_ctx.c != state.ctx.c {
+        mismatches += 1;
+        eprintln!("mismatch carry: interp {}, recompiled {}", interp_ctx.c, state.ctx.c);
+    }
+    // the bhs loop takes the store once more with r1 = 0 (the -32 that clears carry), like the
+    // title's memclr; both sides must land there
+    assert_eq!(interp_ctx.r[0], HEAP + 0x120, "the loop walked r0 {:#x}", interp_ctx.r[0]);
+    assert_eq!(interp_ctx.r[1], 0xFFFF_FFE0, "the loop counted down to -32");
+    for i in 0..72u32 {
+        let a = memory.read32(HEAP + i * 4);
+        let b = memory2.read32(HEAP + i * 4);
+        if a != 0 || b != 0 {
+            mismatches += 1;
+            eprintln!("mismatch heap+{:#x}: interp {a:#x}, recompiled {b:#x}", i * 4);
+        }
+    }
+    assert_eq!(memory2.stats().faults, faults_before, "the populated page tables took every store");
+    assert_eq!(mismatches, 0, "the interpreter and the recompiled loop agree");
 }
