@@ -2469,50 +2469,6 @@ mod without_pages_tests {
     }
 }
 
-#[cfg(test)]
-mod walk_hash_tests {
-    use super::*;
-
-    /// OOT-FPS2: a walker hash stands only for a page pending in a pool that takes no watch of its own at upload and
-    /// that the sync's own scan did not take again (written after the hash).
-    #[test]
-    fn walker_hashes_stand_only_for_pending_pages_not_scanned_again() {
-        let p = PAGE;
-        let known = [(p, 1), (2 * p, 2), (3 * p, 3), (5 * p, 5)];
-        // page 2 scanned again, page 5 not allowed (its pool takes its own watch), page 4 not known
-        let got = walk_hashes_usable(&known, vec![3 * p, p, 2 * p, 4 * p, p], vec![2 * p]);
-        assert_eq!(got, vec![(p, 1), (3 * p, 3)]);
-        assert!(walk_hashes_usable(&[], vec![p], vec![]).is_empty());
-        assert!(walk_hashes_usable(&known, vec![], vec![]).is_empty());
-    }
-}
-
-/// Tests that drain the stash (`drain_walk` hands `WALK_HASHES` to the draining thread) run one at a time.
-#[cfg(test)]
-static DRAIN_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-mod drain_hash_tests {
-    use super::*;
-
-    /// OOT-FPS2: the stash's hashes stand for the holder that drains them only: a drain moves the epoch (a batch hashed
-    /// across it is dropped by `walk_hash`), hands the later of two hashes of one page, ascending, once.
-    #[test]
-    fn a_drain_hands_the_latest_hashes_to_its_own_thread_and_moves_the_epoch() {
-        let _d = DRAIN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let mut m = Pools::default();
-        let base = 0x7000_0000u64;
-        let e0 = DRAIN_EPOCH.load(Ordering::Acquire);
-        WALK_HASHES.lock().unwrap().extend([(base + PAGE, 7), (base, 1), (base + PAGE, 8)]);
-        let mut stash = vec![base, base + PAGE];
-        drain_walk(&mut m, &mut stash);
-        assert!(DRAIN_EPOCH.load(Ordering::Acquire) > e0);
-        assert_eq!(take_drained(), vec![(base, 1), (base + PAGE, 8)], "ascending, the later hash of a page");
-        assert!(WALK_HASHES.lock().unwrap().is_empty());
-        assert!(take_drained().is_empty(), "taken once");
-    }
-}
-
 /// A pool's pending CPU-written ranges split at [lo, hi): (the parts inside, the parts outside).
 fn split_pending(pending: Vec<(u64, u64)>, lo: u64, hi: u64) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
     let (mut inside, mut outside) = (Vec::new(), Vec::new());
@@ -3008,12 +2964,6 @@ fn walk_some(job: &WalkJob, step_aside: bool) {
         // a range no longer mapped (a pool gone meanwhile) reads as failed: this walk covers nothing; the pages it did
         // take (reset already) are kept (audit L1)
         let (pages, ok) = watch::take_partial(lo, hi, true);
-        // (the walker thread's own walk: its pages hashed after it, `walk_hash`)
-        WALK_TOOK.with(|t| {
-            if let Some(v) = t.borrow_mut().as_mut().filter(|_| !pages.is_empty()) {
-                v.push((DRAIN_EPOCH.load(Ordering::Acquire), pages.clone()));
-            }
-        });
         s.extend(pages);
         if ok {
             job.piece_done[i].store(true, Ordering::Release);
@@ -3163,9 +3113,6 @@ fn walker_main() {
                 job.full = full;
                 let job = std::sync::Arc::new(job);
                 WALK.lock().unwrap().job = Some(job.clone());
-                if walk_hash_on() {
-                    WALK_TOOK.with(|t| *t.borrow_mut() = Some(Vec::new()));
-                }
                 walk_some(&job, true);
                 walk_finish(&job)
             }
@@ -3201,12 +3148,6 @@ fn walker_main() {
             }
         }
         WALK_CV.notify_all();
-        // (after the walk is published: no sync waits for this)
-        if let Some(took) = WALK_TOOK.with(|t| t.borrow_mut().take()) {
-            if let Some(g) = super::Gpu::try_get() {
-                walk_hash(g, took);
-            }
-        }
         if let Some(g) = super::Gpu::try_get() {
             seal_some(g);
             seal_check(g);
@@ -3380,113 +3321,10 @@ fn walk_pieces(list: &[WatchedPool], piece: u64) -> Vec<(u64, u64)> {
 /// draws, which take the pool lock for every storage buffer they write: MKW 7 -> 13 ms of sets a frame.)
 static WATCH_MU: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 
-// (OOT-FPS2) The walker's pages hashed on the walker's side. Ocarina of Time's CPU rewrites ~57 MB a frame of pages
-// with the bytes the GPU copy holds; the upload skip hashed every one of them on the replay thread at its sync
-// (`upskip::prehash`, ~1.9 ms a frame). The walker takes most of them at the present's walk, a frame's work before
-// the replay thread's sync drains them: it hashes them after its walk (the hash threads with it), and the drain hands
-// those hashes to the sync that drains them. A hash so taken is as good as the sync's own: it is of the bytes after
-// the walk reset the page's write watch, so a store after it is taken by the next scan (as `prehash`'s). It stands
-// only while its page is still in the stash: every other resetting take of the write watch holds `WATCH_MU` and drains
-// the stash first (moving `DRAIN_EPOCH`), and a hash whose batch was drained before it was put is dropped; a drain
-// hands its hashes to its own thread only (`DRAINED`, emptied at each `watch_lock`), and the sync uses them only for
-// pages its own scan did not take again and whose pool takes no write watch of its own at upload. `NXGFX_WALK_HASH=0`:
-// off.
-
-/// Moves at every drain of the stash (under `WATCH_MU`).
-static DRAIN_EPOCH: AtomicU64 = AtomicU64::new(0);
-/// (page, hash) of stashed pages the walker hashed, in the order put (under `WATCH_MU`).
-static WALK_HASHES: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
-/// Pages a frame the walker hashed, of them handed to a sync, and used by one (instead of hashed there): the pools line.
-static WALK_HASHED: AtomicU64 = AtomicU64::new(0);
-static WALK_HANDED: AtomicU64 = AtomicU64::new(0);
-static WALK_USED: AtomicU64 = AtomicU64::new(0);
-thread_local! {
-    /// The walker thread's walk in progress: (drain epoch, pages) of each piece it took.
-    static WALK_TOOK: std::cell::RefCell<Option<Vec<(u64, Vec<u64>)>>> = const { std::cell::RefCell::new(None) };
-    /// The hashes the last drain on this thread handed it, ascending by page.
-    static DRAINED: std::cell::RefCell<Vec<(u64, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-fn walk_hash_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| super::upskip::on() && std::env::var("NXGFX_WALK_HASH").as_deref() != Ok("0"))
-}
-
-/// After the walker's walk: its pages hashed (pieces of them under the pool lock, so no pool goes while its pages are
-/// read), and the hashes of the pages still in the stash put beside it.
-fn walk_hash(g: &Gpu, took: Vec<(u64, Vec<u64>)>) {
-    const PIECE: usize = 256;
-    let mut done: Vec<(u64, Vec<(u64, u64)>)> = Vec::new();
-    for (epoch, pages) in took {
-        let mut out = Vec::with_capacity(pages.len());
-        for piece in pages.chunks(PIECE) {
-            let m = g.mem.lock().unwrap();
-            // a page of a mirrored pool with its buffer (what the upload skip decides on) still there
-            let keep: Vec<u64> = piece
-                .iter()
-                .copied()
-                .filter(|&pg| {
-                    find(&m, pg, PAGE).and_then(|b| m.by_base.get(&b)).is_some_and(|p| {
-                        p.buf.is_some() && p.placement == Placement::Mirror && pg >= p.base && pg + PAGE <= p.base + p.size
-                    })
-                })
-                .collect();
-            let hs = super::upskip::hash_pages(&keep);
-            drop(m);
-            out.extend(keep.into_iter().zip(hs));
-        }
-        done.push((epoch, out));
-    }
-    let _s = WATCH_MU.lock().unwrap();
-    let now = DRAIN_EPOCH.load(Ordering::Acquire);
-    let mut w = WALK_HASHES.lock().unwrap();
-    for (epoch, hs) in done {
-        if epoch == now {
-            WALK_HASHED.fetch_add(hs.len() as u64, Ordering::Relaxed);
-            w.extend(hs);
-        }
-    }
-}
-
-/// Of the walker's hashes a sync's drain handed it (`known`, ascending), those of pages in `may` (pending in a pool
-/// that takes no write watch of its own at upload) and not in `scanned` (taken again by the sync's own scan: written
-/// after the walker's hash), ascending.
-fn walk_hashes_usable(known: &[(u64, u64)], mut may: Vec<u64>, mut scanned: Vec<u64>) -> Vec<(u64, u64)> {
-    if known.is_empty() || may.is_empty() {
-        return Vec::new();
-    }
-    may.sort_unstable();
-    may.dedup();
-    scanned.sort_unstable();
-    known
-        .iter()
-        .copied()
-        .filter(|(pg, _)| may.binary_search(pg).is_ok() && scanned.binary_search(pg).is_err())
-        .collect()
-}
-
-/// The hashes the last drain on this thread handed it (`walk_hash`), ascending by page; emptied.
-fn take_drained() -> Vec<(u64, u64)> {
-    DRAINED.with(|d| std::mem::take(&mut *d.borrow_mut()))
-}
-
 /// The walker's stashed pages into their pools' `pending` (the pools there now). Under the pool lock.
 fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
     if stash.is_empty() {
         return;
-    }
-    DRAIN_EPOCH.fetch_add(1, Ordering::AcqRel);
-    {
-        let mut w = WALK_HASHES.lock().unwrap();
-        if !w.is_empty() {
-            let mut v = std::mem::take(&mut *w);
-            // a page put twice (two walks before a drain): the later hash
-            v.reverse();
-            v.sort_by_key(|e| e.0);
-            v.dedup_by_key(|e| e.0);
-            WALK_HANDED.fetch_add(v.len() as u64, Ordering::Relaxed);
-            DRAINED.with(|d| *d.borrow_mut() = v);
-        }
     }
     let mut taken = HashMap::new();
     if drain_list_on() {
@@ -3535,8 +3373,6 @@ fn watch_lock(m: &mut Pools) -> std::sync::MutexGuard<'static, Vec<u64>> {
     WATCH_WANT.fetch_add(1, Ordering::AcqRel);
     let mut s = WATCH_MU.lock().unwrap();
     WATCH_WANT.fetch_sub(1, Ordering::AcqRel);
-    // (the walker's hashes stand for this holder's drain only)
-    DRAINED.with(|d| d.borrow_mut().clear());
     drain_walk(m, &mut s);
     drain_woken(m);
     WATCH_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -4020,8 +3856,6 @@ pub fn begin_submit_ex(
     let mut m = g.mem.lock().unwrap();
     // the walker's pages first, and none taken by it while this sync scans and uploads
     let _watch = watch_lock(&mut m);
-    // the walker's hashes of the pages this drain moved into the pools (`walk_hash`)
-    let walk_known = take_drained();
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_scan = std::time::Instant::now();
     #[cfg(target_os = "emscripten")]
@@ -4206,21 +4040,12 @@ pub fn begin_submit_ex(
     // walks, drained into `pending`, with no scan of the sync's own)
     if super::upskip::on() {
         let mut pages: Vec<u64> = taken.values().flatten().copied().collect();
-        // pages whose walker hash may stand (`walk_hash`): pending in a pool that takes no write watch of its own at
-        // its upload below (asked by this sync's scan, or this sync covered), not taken again by this scan
-        let mut may_know: Vec<u64> = Vec::new();
         let mut pend = |p: &Pool| {
             if p.buf.is_some() && p.placement == Placement::Mirror {
-                let known_ok = !walk_known.is_empty()
-                    && p.watched
-                    && (covered || (taken.contains_key(&p.base) && !retry_watch.contains(&p.base)));
                 for &(a, n) in &p.pending {
                     let mut pg = a & !(PAGE - 1);
                     while pg < a + n {
                         pages.push(pg);
-                        if known_ok {
-                            may_know.push(pg);
-                        }
                         pg += PAGE;
                     }
                 }
@@ -4236,9 +4061,7 @@ pub fn begin_submit_ex(
         } else {
             m.by_base.values().for_each(&mut pend);
         }
-        let known = walk_hashes_usable(&walk_known, may_know, taken.values().flatten().copied().collect());
-        WALK_USED.fetch_add(known.len() as u64, Ordering::Relaxed);
-        super::upskip::prehash(&pages, &known);
+        super::upskip::prehash(&pages);
     }
     // (MKW-SYNC, `sync_lean`) the pools a scan found written or could not read, for the per-pool pass below
     let scan_keys: Vec<u64> = if !covered && sync_lean() {
@@ -5119,19 +4942,8 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &super::lazy::summary(f)
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
-        + &walk_hash_summary(f)
         + &super::wbdiff::report(f)
         + &web_summary(f)
-}
-
-/// The walker's hashes a frame (`walk_hash`): hashed, handed to a sync by its drain, used there instead of a hash.
-fn walk_hash_summary(f: f64) -> String {
-    if !walk_hash_on() {
-        return String::new();
-    }
-    let mb = |a: &AtomicU64| (a.swap(0, Ordering::Relaxed) * PAGE) as f64 / f / 1048576.0;
-    let (h, d, u) = (mb(&WALK_HASHED), mb(&WALK_HANDED), mb(&WALK_USED));
-    format!("; pages hashed by the pool walker a frame (NXGFX_WALK_HASH): {h:.2} MB, {d:.2} MB handed to a sync, {u:.2} MB used there")
 }
 
 /// (web) What the compare by use read a frame, and its time.
@@ -5416,7 +5228,6 @@ mod seal_tests {
     /// the next drain, and an unwatched pool none.
     #[test]
     fn drained_pages_reach_their_pools_with_the_list_kept() {
-        let _d = DRAIN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let p = PAGE;
         let mut m = pools(&[(0, 4 * p), (100 * p, 50 * p), (110 * p, 2 * p)]);
         let mut stash = vec![p, 3 * p, 110 * p, 120 * p, 300 * p];
@@ -5578,7 +5389,6 @@ mod seal_tests {
     /// what makes a pool busy is any work of its own (pending, deferred, texture-dirty) or having no write watch.
     #[test]
     fn work_handed_to_a_pool_makes_it_busy() {
-        let _d = DRAIN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let p = PAGE;
         let mut m = pools(&[(0, 4 * p), (8 * p, 4 * p)]);
         assert!(m.busy.is_empty());
