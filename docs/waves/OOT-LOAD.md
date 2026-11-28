@@ -37,6 +37,43 @@ buffer was ever made or freed over that page, and no kept stage set has a bindin
 
 Exclusions: Fault A (the white house floor); live native NDVE stays off.
 
+## Diagnosis (runs in this worktree's `build/play/`)
+
+- `20261128-090152-diag1` (the dispatch's descriptor buffers recorded, buffers above the fault listed, the CPU offset
+  check on): the same loss at 53.0 s, a read at `0x520c52000`, again just past the newest 4 MB chunk (made at
+  50.064 s). But the faulting NDSR dispatch (`f8965bffbdf51d78`, recorded at 50.038 s) read its stage set from a
+  different chunk (`0x54ea20000`, set at +0x238c0, in range), bound no pool set, and the CPU check never fired over
+  the whole run. **The descriptor-index hypothesis is disproved**: no descriptor read ran past its buffer; the newest
+  chunk was only allocated over memory freed just before.
+- `20261128-090743-diag2` (`NXGFX_ADDR_REPORT=1`, `NXGFX_LOG_SHADER=f8965bffbdf51d78`, images actually freed recorded
+  with the timeline): the fault lies **inside IMAGE ser18252 (2560x1440), bound at 47.89 s, UNBOUND at 50.38 s**. Its
+  memory was freed at 50.38 s with timeline completed = submitted = 14468, while the dispatch reading over that
+  storage was recorded at 50.383 s into the submission given timeline 14469, **submitted at 50.408 s**: the memory was
+  freed before the submission that read it was even submitted. ser18252 is one of the images over storage
+  `0x13fa17400` made again with storage use (`upgrade_storage`, a texture used as an image without the IMAGE flag)
+  during the load; their old backing goes through `defer_image_free` -> `Queue::defer_after_use`.
+- **Cause.** `defer_after_use` held a release for "the submission being recorded now" with one global flag
+  (`recording`, set in `make_sub`, cleared in `submit_sub`). `chain_parked` (parked streams run on after a pool sync)
+  begins the next submission (`chained_sub`) *before* it submits the previous one. That submit took the next
+  submission's releases with its own fence and cleared the flag, so every release asked while the next submission
+  recorded went to `defer(last_fence)` and ran as soon as the previous submission completed: the old images' memory was
+  freed under the GPU work still to read it. The load is where many parked streams chain while images are made again;
+  the normal `oot` route's chained submissions had no such release to make.
+
+## Fix
+
+`queue.rs` `AfterUse`: each release asked while submissions are recorded is tagged with the newest submission begun
+(its serial); a submit takes only the releases tagged up to its own serial and its children's (begun after it,
+submitted with it); the rest wait for the later submission's fence. "Recording" is "a submission begun is not yet
+submitted", so the previous one's submit no longer ends the next one's recording. Unit tests
+`after_use_tests::a_release_asked_while_the_next_submission_records_waits_for_it` (the chained order: with one flag
+the previous submit took the later release and the next ones ran at once) and `children_are_covered_by_their_parent_submit`.
+
+Kept from the diagnosis (cheap, always on): the loss ring's dispatch record (its stage-set chunk, set offset, pool set
+buffer, and where the fault lies against each), buffers starting above the faulting page, the images actually
+destroyed with the timeline then, and a CPU check where each set's offset is handed to the GPU (the bound chunk is the
+one the set was written in and holds it: a red line naming the stage and shader otherwise).
+
 ## Files expected
 
 - `src/graphics/src/vk/lost_ring.rs` (bind ring, report above the fault), `src/graphics/src/vk/exec.rs` (bind

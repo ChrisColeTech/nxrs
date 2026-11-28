@@ -208,21 +208,59 @@ last = "Link in his house"
 
 [oot-saved]
 title = "The Legend of Zelda Ocarina of Time"
-about = "from the autosave in build/saves/oot-house (taken from an oot run): title, load, Link in his house"
-# The save is the autosave an oot run writes at ~413 s (build/play/20261128-044556-r2-base/save; build/ is not in
-# git, so it stays on this machine). The title shows Continue at ~29 s; A -> the Load list (the autosave "Kokiri
-# Forest" selected) -> A -> Load / Cancel -> A loads. First probe (build/play/20261128-083853-oot-saved-probe): the
-# GPU device was lost at 53.5 s during that load (a read 0x1000 past the end of a 4 MB descriptor buffer).
+about = "the house autosave (build/saves/oot-house): title, load, Link standing in his house, three walk squares"
+# The quick OoT scenario (~4 min against oot's 15). The save is the autosave an oot run writes at ~413 s
+# (build/play/20261128-044556-r2-base/save; build/ is not in git, so it stays on this machine). A at 25 s passes the
+# intro to the title (Continue); A -> the Load list (the autosave "Kokiri Forest" selected) -> A -> Load / Cancel ->
+# A at ~38 s loads: black from ~41 s (one ~3.6 s replay frame at ~50 s), Link under control in his house ("Move /
+# Change View", the camera by the bed) by ~60-65 s (OOT-LOAD: build/play/20261128-091353-fix1, -091717-saved-r1).
+# That load lost the device until OOT-LOAD (an image's old backing freed before the submission reading it was
+# submitted). Shots every 2.5 s over the load; Link then stands untouched from ~64 to ~162 s (the window, as
+# oot-still's h2-h7; s1-s8) and walks oot_house_walk.txt three times from ~162 to ~236 s (oot-saved-walk's window).
 save = "build/saves/oot-house"
-seconds = 150
-window = [110, 150]
+seconds = 245
+window = [80, 155]
 fps = 59
-steps = ["wait 25", "shot title", "press A ; 4", "shot p01", "press A ; 4", "shot p02", "press A ; 4", "shot p03",
-         "press A ; 4", "shot p04", "press A ; 4", "shot p05", "press A ; 4", "shot p06", "press A ; 4", "shot p07",
-         "press A ; 4", "shot p08", "press A ; 4", "shot p09", "press A ; 4", "shot p10", "press A ; 4", "shot p11",
-         "press A ; 4", "shot p12", "press A ; 4", "shot p13", "press A ; 4", "shot p14", "press A ; 4", "shot p15",
-         "press A ; 4", "shot p16", "press A ; 4", "shot p17", "press A ; 4", "shot p18", "press A ; 4", "shot p19",
-         "press A ; 4", "shot p20", "wait 5", "shot last"]
+steps = ["wait 25", "shot intro", "press A ; 4", "shot title", "press A ; 4", "shot loadlist", "press A ; 4",
+         "shot confirm", "press A ; 2.5", "shot l01", "wait 2.5", "shot l02", "wait 2.5", "shot l03", "wait 2.5",
+         "shot l04", "wait 2.5", "shot l05", "wait 2.5", "shot l06", "wait 2.5", "shot l07", "wait 2.5", "shot l08",
+         "wait 2.5", "shot l09", "wait 2.5", "shot l10", "wait 2.5", "shot l11", "wait 2.5", "shot l12",
+         "wait 10", "shot s1", "wait 10", "shot s2", "wait 10", "shot s3", "wait 10", "shot s4", "wait 10", "shot s5",
+         "wait 10", "shot s6", "wait 10", "shot s7", "wait 10", "shot s8",
+         "replay oot_house_walk.txt ; 3", "shot walk1", "wait 6", "shot walk2", "wait 6", "shot walk3",
+         "wait 9", "replay oot_house_walk.txt ; 3", "shot walk4", "wait 6", "shot walk5", "wait 6",
+         "shot walk6", "wait 9", "replay oot_house_walk.txt ; 3", "shot walk7", "wait 6", "shot walk8",
+         "wait 6", "shot walk9", "wait 9", "shot last"]
+[oot-saved.checks]
+loadlist = "the Load list, the 'Kokiri Forest' autosave"
+s1 = "Link in his house"
+s8 = "Link in his house"
+walk1 = "Link walking in his house"
+last = "Link in his house"
+
+[oot-saved-walk]
+title = "The Legend of Zelda Ocarina of Time"
+about = "as oot-saved (the same steps, shots and checks); the window is the three walk squares"
+save = "build/saves/oot-house"
+seconds = 245
+window = [165, 233]
+fps = 59
+steps = ["wait 25", "shot intro", "press A ; 4", "shot title", "press A ; 4", "shot loadlist", "press A ; 4",
+         "shot confirm", "press A ; 2.5", "shot l01", "wait 2.5", "shot l02", "wait 2.5", "shot l03", "wait 2.5",
+         "shot l04", "wait 2.5", "shot l05", "wait 2.5", "shot l06", "wait 2.5", "shot l07", "wait 2.5", "shot l08",
+         "wait 2.5", "shot l09", "wait 2.5", "shot l10", "wait 2.5", "shot l11", "wait 2.5", "shot l12",
+         "wait 10", "shot s1", "wait 10", "shot s2", "wait 10", "shot s3", "wait 10", "shot s4", "wait 10", "shot s5",
+         "wait 10", "shot s6", "wait 10", "shot s7", "wait 10", "shot s8",
+         "replay oot_house_walk.txt ; 3", "shot walk1", "wait 6", "shot walk2", "wait 6", "shot walk3",
+         "wait 9", "replay oot_house_walk.txt ; 3", "shot walk4", "wait 6", "shot walk5", "wait 6",
+         "shot walk6", "wait 9", "replay oot_house_walk.txt ; 3", "shot walk7", "wait 6", "shot walk8",
+         "wait 6", "shot walk9", "wait 9", "shot last"]
+[oot-saved-walk.checks]
+loadlist = "the Load list, the 'Kokiri Forest' autosave"
+s1 = "Link in his house"
+s8 = "Link in his house"
+walk1 = "Link walking in his house"
+last = "Link in his house"
 
 [mk8d]
 title = "Mario Kart 8 Deluxe"
