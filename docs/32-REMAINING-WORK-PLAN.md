@@ -221,6 +221,13 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       read by the lead); peak memory 29.5 GB. Open: replay thread ~19.5 ms against ~15.8 for one vsync (set
       building ~5.2 ms, hashing CPU rewrites ~3.4 ms); Fault A white house frames (10 in `-211650-fps-final2-house`);
       memory item (table-only pools) not done.
+- [~] **OOT-FPS2** (2026-11-28, merged; `docs/waves/OOT-FPS2.md`). Pool tables skip the ~4,500-pool walk while
+      `POOL_GEN` stands (`NXGFX_GMEM_WALK_SKIP`, gmem::bindings 1.25 -> 0.07 ms); page hashing batched, 12 threads
+      (`NXGFX_HASH_THREADS`). `oot` 845-915 s: 29.5 / 26.0 (`20261127-220112-fps2-base-prof`) -> 29.8 / 28.0 of 59
+      (`20261128-000649-fps2-final-prof`, on route, sheets read by the lead); replay+prep 19.3 -> 17.2 ms. Walker
+      hashing, scan-time hashing and lazy-image waits were built, moved nothing, removed. Open: the game's own frame
+      takes ~1.3 vsyncs (main thread 90% idle, blocked on other guest threads: next, profile what those wait on);
+      opening's held-back writes 16 -> 138 MB on one line (pictures correct); Fault A (14 in `-002206-fps2-final-house`).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
