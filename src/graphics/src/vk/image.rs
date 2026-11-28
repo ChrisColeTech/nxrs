@@ -3172,11 +3172,17 @@ impl Gpu {
         if !lazy::has(id) && !lazy::making() {
             return;
         }
+        // (OOT-FPS2) only when this ID waits or is being made: a use of an ID whose image exists waited for any batch
+        // another thread was making (OoT: ~2.4 % of the replay thread at that lock, lanes making the house's textures)
+        if wait_by_id() && !lazy::pending(id) {
+            return;
+        }
         let _making = lazy::make_lock();
-        if let Some((t, v, gone)) = lazy::take(id) {
+        if let Some((t, v, gone)) = lazy::take_to_make(id) {
             super::gate::count();
             textrace::ev(t.serial, || format!("taken at ID {id} for a bound use (finalized {gone})"));
             self.reg_tex_now(id, &t, v, false);
+            lazy::made([id]);
             if gone {
                 self.release_after_use(t.serial);
             }
@@ -3238,6 +3244,7 @@ impl Gpu {
     /// Lazily registered textures made now (a shader indexes the texture pool itself: any ID may be read), at most a
     /// frame's budget of them (`lazy::take_for_frame`; the rest in the next frames).
     pub fn materialize_all(&self) {
+        // (the IDs taken are in flight until made, `lazy::made`: a bound use of one waits for this batch)
         if lazy::waiting() == 0 {
             return;
         }
@@ -3248,6 +3255,7 @@ impl Gpu {
             return;
         }
         let n = all.len();
+        let ids: Vec<i32> = all.iter().map(|e| e.0).collect();
         for (id, (t, v, gone)) in all {
             textrace::ev(t.serial, || format!("taken at ID {id} for the pool (finalized {gone})"));
             self.reg_tex_now(id, &t, v, false);
@@ -3255,6 +3263,7 @@ impl Gpu {
                 self.release_after_use(t.serial);
             }
         }
+        lazy::made(ids);
         static SAID: std::sync::Once = std::sync::Once::new();
         SAID.call_once(|| {
             crate::vklog!(
@@ -5990,6 +5999,13 @@ pub mod textrace {
     }
 }
 
+/// `NXGFX_LAZY_WAIT_ID=0`: a bound use waits for any batch of lazy images being made, as before OOT-FPS2; by default
+/// only for one that took its own ID (`lazy::pending`).
+fn wait_by_id() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAZY_WAIT_ID").as_deref() != Ok("0"))
+}
+
 /// Texture registrations waiting for their image (`Gpu::reg_tex`).
 mod lazy {
     use crate::nvn::obj::{tex_t, view_t};
@@ -6003,6 +6019,8 @@ mod lazy {
         by_serial: HashMap<u64, Vec<i32>>,
         /// texture objects finalized while registrations of them still wait (`finalized`)
         gone: std::collections::HashSet<u64>,
+        /// IDs taken off the list to be made whose images are not made yet (`take_to_make`, `take_for_frame`; `made`)
+        in_flight: std::collections::HashSet<i32>,
     }
     static ST: Mutex<Option<L>> = Mutex::new(None);
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -6049,6 +6067,34 @@ mod lazy {
     pub fn has(id: i32) -> bool {
         N.load(Ordering::Relaxed) != 0
             && ST.lock().unwrap().as_ref().is_some_and(|l| l.by_id.contains_key(&id))
+    }
+    /// Whether a registration waits at `id` or was taken off the list and its image is not made yet (OOT-FPS2: a use
+    /// waits for `make_lock` only then, not whenever any thread makes images).
+    pub fn pending(id: i32) -> bool {
+        ST.lock().unwrap().as_ref().is_some_and(|l| l.by_id.contains_key(&id) || l.in_flight.contains(&id))
+    }
+    /// `take`, the ID in flight until `made` (under `make_lock`).
+    pub fn take_to_make(id: i32) -> Option<(tex_t, Option<view_t>, bool)> {
+        if N.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let mut g = ST.lock().unwrap();
+        let l = g.as_mut()?;
+        let got = remove(l, id);
+        if got.is_some() {
+            N.fetch_sub(1, Ordering::Relaxed);
+            l.in_flight.insert(id);
+        }
+        got
+    }
+    /// The images of these IDs, taken to be made, are made.
+    pub fn made(ids: impl IntoIterator<Item = i32>) {
+        let mut g = ST.lock().unwrap();
+        if let Some(l) = g.as_mut() {
+            for id in ids {
+                l.in_flight.remove(&id);
+            }
+        }
     }
     /// The registration waiting at `id`, and whether its texture object was finalized since (`finalized`).
     pub fn take(id: i32) -> Option<(tex_t, Option<view_t>, bool)> {
@@ -6119,10 +6165,14 @@ mod lazy {
         N.store(0, Ordering::Relaxed);
         l.by_serial.clear();
         let gone = std::mem::take(&mut l.gone);
-        l.by_id
+        let got: Vec<_> = l
+            .by_id
             .drain()
             .map(|(id, (t, v))| (id, (t, v, gone.contains(&t.serial))))
-            .collect()
+            .collect();
+        // (in flight until `made`: a use of one of them waits for its image)
+        l.in_flight.extend(got.iter().map(|e| e.0));
+        got
     }
 
     /// What a frame may still make for pool-indexing shaders (`take_for_frame`).
@@ -6213,6 +6263,7 @@ mod lazy {
         };
         let got = pick(l, n, bytes);
         N.fetch_sub(got.len(), Ordering::Relaxed);
+        l.in_flight.extend(got.iter().map(|e| e.0));
         b.spend(got.len(), got.iter().map(|(_, (t, _, _))| t.l.size).sum());
         got
     }
@@ -6268,6 +6319,31 @@ mod lazy {
             let _m = make_lock();
             assert!(made.load(Ordering::SeqCst), "the lock comes after the batch is made");
             maker.join().unwrap();
+        }
+
+        /// OOT-FPS2: an ID is pending while it waits and while it is in flight (taken to be made, `take_to_make` or a
+        /// batch, until `made`); one never registered lazily, or made, is not, so its use needs no make lock.
+        #[test]
+        fn an_id_is_pending_from_its_registration_until_its_image_is_made() {
+            put(930_001, tex(0xF3_0001), None);
+            put(930_002, tex(0xF3_0002), None);
+            assert!(pending(930_001) && pending(930_002), "waiting");
+            assert!(!pending(930_003), "never registered lazily");
+            let _m = make_lock();
+            assert!(take_to_make(930_001).is_some());
+            assert!(!has(930_001) && pending(930_001), "off the list, in flight");
+            let batch = {
+                let mut g = ST.lock().unwrap();
+                let l = g.as_mut().unwrap();
+                let got = remove(l, 930_002).map(|r| vec![(930_002, r)]).unwrap_or_default();
+                N.fetch_sub(got.len(), Ordering::Relaxed);
+                l.in_flight.extend(got.iter().map(|e| e.0));
+                got
+            };
+            assert_eq!(batch.len(), 1);
+            assert!(pending(930_002), "a batch's ID in flight");
+            made([930_001, 930_002]);
+            assert!(!pending(930_001) && !pending(930_002), "made");
         }
 
         /// A pool-indexing shader makes at most a frame's budget of the waiting images, live textures first; the
