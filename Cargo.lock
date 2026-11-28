@@ -1828,6 +1828,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "os3ds"
+version = "0.1.0"
+dependencies = [
+ "runtime3ds",
+ "translator3ds",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
