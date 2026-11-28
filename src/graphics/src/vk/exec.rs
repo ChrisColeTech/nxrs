@@ -10113,7 +10113,8 @@ fn translate_segment(
     // it once the last segment's state is the queue's)
     flush_ndve(g, c, wq);
     end_pass(g, c, wq);
-    super::gmem::end(g, c);
+    // (outside any pass now: the log is copied to host-cached memory as at submission)
+    super::gmem::end_submit(g, c);
     draws
 }
 

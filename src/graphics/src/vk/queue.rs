@@ -950,7 +950,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         std::mem::swap(&mut s.pre, &mut l.pre);
         std::mem::swap(&mut s.main, &mut l.main);
     }
-    super::gmem::end(g, &mut s);
+    super::gmem::end_submit(g, &mut s);
     // write-backs: copy the GPU-written ranges into one readback buffer at the end of the replay
     exec::seg_stats::WB_RANGES.fetch_add(s.writebacks.len() as u64, Ordering::Relaxed);
     let total: u64 = s.writebacks.iter().map(|w| (w.2 + 15) & !15).sum();
