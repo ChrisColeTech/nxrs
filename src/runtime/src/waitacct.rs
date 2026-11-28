@@ -334,7 +334,8 @@ mod tests {
             r[1],
             "waits: 0x1001 e1001 cpu 10%, in waits 9%, other 81%: condvar 0x5000 80.0 (20/s, 6.0; by 0x1004 75%, host:vk replay 25%) | host nvnSyncWait 10.0 (10/s, 1.0; by timeout 100%)"
         );
-        assert!(r[2].starts_with("waits: 0x1004 e1004 cpu 50%, in waits 5%") && r[2].contains("sync h0x10a2 5.0"), "{}", r[2]);
+        // 0.5 ms of sync wait in 0.1 s: 0.5 %; the call's 0.2 ms would have made it 0.7 % (shown as 1 %)
+        assert!(r[2].starts_with("waits: 0x1004 e1004 cpu 50%, in waits 0%") && r[2].contains("sync h0x10a2 5.0"), "{}", r[2]);
         assert!(r[2].contains("| call 0x99 2.0 (10/s"), "{}", r[2]);
         assert_eq!(key_name(K_SVC, 0x21 << 32 | 0x10f0), "0x21 h0x10f0");
     }
