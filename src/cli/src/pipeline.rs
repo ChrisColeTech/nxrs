@@ -796,11 +796,201 @@ pub fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
+/// A 3DS dump's magic: NCSD at 0x100 (a .3ds cart image), NCCH at 0x100 (a .cxi, or a bare .app
+/// content file), or a CIA header size of 0x2020 at 0. The Switch package reader must not see
+/// these bytes, so this runs before `package::open_game`.
+fn is_3ds(input: &Path) -> Result<bool> {
+    let head = head_of(input, 0x200)?;
+    Ok(translator3ds::title::kind_of(&head).is_ok())
+}
+
+/// the first `len` bytes of a file (short when the file is), nothing more is ever read
+fn head_of(input: &Path, len: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(input).map_err(|e| anyhow!("{}: {e}", input.display()))?;
+    let mut head = Vec::new();
+    f.take(len as u64)
+        .read_to_end(&mut head)
+        .map_err(|e| anyhow!("{}: {e}", input.display()))?;
+    Ok(head)
+}
+
+/// the data file the 3DS runtime's interpreter writes its interpreted addresses to (3DS-W2);
+/// this build reads them back as function starts when a previous run left them
+const HINTS_FILE: &str = "discovered.tsv";
+
+/// `nxrs-build build <game>.3ds|.cia|.cxi`: open, translate (exe + CRO programs as C), stage the
+/// data folder (programs, romfs/, control.smdh, romfs.source). W1 stops there: compile and link
+/// wait for the 3DS engine runtime (3DS-W2/W3), so without `--no-build` the build says exactly
+/// that and exits without faking a game.
+fn build_3ds(a: &BuildArgs, out: &Out) -> Result<Built> {
+    let mut timings = vec![];
+    if a.web {
+        bail!("the 3DS web lane is a later wave (3DS-W7): build this title with --no-build for now");
+    }
+    if a.interp_only {
+        bail!("--interp-only is the Switch interpreter's diagnostic; the 3DS one is a later wave (3DS-W2)");
+    }
+    if matches!(a.update, UpdateChoice::Package(_)) {
+        bail!("update CIAs are a later wave for 3DS titles: build the game alone for now");
+    }
+    if a.chunk.is_some() {
+        out.say("nxrs-build: ignored (--chunk: the 3DS translator sizes its chunks itself)");
+    }
+    out.say("nxrs - use your own copy of the game. No games or keys included.");
+    if let Some(i) = &a.ignored {
+        out.say(i);
+    }
+    out.progress("open", 0, 0);
+    let game = translator3ds::title::open(&a.input)
+        .map_err(|e| anyhow!("Cannot load the game: {e}"))?;
+    let mods = translator3ds::Mods::default();
+    // module lines: the exe and every CRO the RomFS carries, where each runs and how big it is
+    let programs = translator3ds::programs(&game.title, mods)
+        .map_err(|e| anyhow!("Cannot read the game's code: {e}"))?;
+    for (name, program) in &programs {
+        out.say(&format!(
+            "  {:<10} {:08X}  code {:.1} MB",
+            name,
+            program.text.base,
+            program.text.bytes.len() as f64 / 1048576.0
+        ));
+    }
+    let title = a.name.clone().unwrap_or_else(|| source_name(&a.input));
+    let name = output_name(&title);
+    let outdir = std::path::absolute(
+        a.outdir
+            .clone()
+            .unwrap_or_else(|| default_outdir(&a.input, &name)),
+    )?;
+    std::fs::create_dir_all(&outdir).with_context(|| format!("creating {}", outdir.display()))?;
+    let base = outdir.join(&name);
+    let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
+    let data = with("_data");
+    let (gen, obj) = (with("_build").join("gen"), with("_build").join("obj"));
+    std::fs::create_dir_all(&obj)?;
+    // the code a previous run's interpreter had to reach starts new functions (3DS-W2 writes the file)
+    let hints = translator3ds::hints::read_hints(
+        &std::fs::read_to_string(data.join(HINTS_FILE)).unwrap_or_default(),
+    );
+    // the gen key: the programs' bytes and the options; an unchanged title is not translated again
+    let mut key = Sha256::new();
+    for (name, program) in &programs {
+        key.update(name.as_bytes());
+        key.update(&program.text.bytes);
+    }
+    key.update(format!("|hints:{hints:?}"));
+    let key = format!("{:x}", key.finalize());
+    let stamp = gen.join("nxrs.gen.key");
+    let reuse = std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str())
+        && gen.join("recomp.h").is_file();
+    let t = Instant::now();
+    out.say("Analyzing the code...");
+    out.progress("analyze", 0, 0);
+    let functions = std::sync::atomic::AtomicUsize::new(0);
+    let chunks;
+    if reuse {
+        chunks = std::fs::read_dir(&gen)?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".c"))
+            .count();
+    } else {
+        let _ = std::fs::remove_file(&stamp);
+        let t_gen = Instant::now();
+        let generated = translator3ds::gen::generate(
+            &game.title,
+            mods,
+            translator3ds::gen::GenOptions3ds {
+                dir: &gen,
+                overrides: None,
+                hints,
+            },
+            &|event| match event {
+                translator3ds::gen::Event::Generated { functions: fns, .. } => {
+                    functions.store(fns, std::sync::atomic::Ordering::Relaxed);
+                }
+                translator3ds::gen::Event::Note(line) => out.say(&format!("  {line}")),
+            },
+        )
+        .map_err(|e| anyhow!("Cannot translate the game: {e}"))?;
+        chunks = generated
+            .sources
+            .iter()
+            .filter(|name| name.ends_with(".c"))
+            .count();
+        let bytes = generated
+            .sources
+            .iter()
+            .filter_map(|name| std::fs::metadata(gen.join(name)).ok())
+            .map(|m| m.len())
+            .sum::<u64>();
+        out.say("Translating ARM11/Thumb to C...");
+        out.say(&format!(
+            "  C generated: {chunks}/{chunks} chunks ({:.0}s)",
+            t_gen.elapsed().as_secs_f64()
+        ));
+        out.progress("translate", chunks, chunks);
+        out.say(&format!(
+            "C code: {} files, {:.1} MB, {} functions",
+            generated.sources.len(),
+            bytes as f64 / 1e6,
+            functions.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&stamp, &key)?;
+    }
+    if reuse {
+        out.say("Translating ARM11/Thumb to C...");
+        out.say(&format!(
+            "  C generated: {chunks}/{chunks} chunks (unchanged since the last build)"
+        ));
+        out.progress("translate", chunks, chunks);
+    }
+    timings.push(("translate", t.elapsed().as_secs_f64()));
+
+    // ---- data folder (the RomFS is written into it: @progress in MB, a RomFS: line every few seconds)
+    let t = Instant::now();
+    out.progress("data", 0, 0);
+    let said_at = std::cell::Cell::new(Instant::now());
+    let progress = |done: u64, total: u64| {
+        let mb = |b: u64| (b >> 20) as usize;
+        out.progress("data", mb(done), mb(total));
+        if said_at.get().elapsed().as_secs() >= 5 && done < total {
+            out.say(&format!("RomFS: {} of {} MB written", mb(done), mb(total)));
+            said_at.set(Instant::now());
+        }
+    };
+    game.write_data_with(&data, &|m: &str| out.say(m), &progress)?;
+    let ini = with(".ini");
+    if !ini.exists() {
+        std::fs::write(&ini, ini_text(&name))?;
+    }
+    timings.push(("data", t.elapsed().as_secs_f64()));
+    out.progress("data", 1, 1);
+    if a.no_build {
+        return Ok(Built {
+            exe: with(".exe"),
+            data,
+            timings,
+        });
+    }
+    bail!(
+        "{} translated and its data folder is staged, but nxrs cannot run 3DS games yet: the \
+         3DS engine runtime is a later wave (3DS-W2/W3), so there is nothing to compile against. \
+         Build with --no-build until then.",
+        a.input.display()
+    );
+}
+
 pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let t_all = Instant::now();
     let mut timings = vec![];
     if !a.input.exists() {
         bail!("Cannot load the game: {} does not exist", a.input.display());
+    }
+    // the container family first: a 3DS dump (.3ds cart image, .cia or .cxi/.app) never enters the
+    // Switch flow below (its package reader would refuse it)
+    if is_3ds(&a.input)? {
+        return build_3ds(a, out);
     }
     // the compiler and the runtime are checked first, not after minutes of translation
     let clang = if a.no_build {
@@ -1416,6 +1606,47 @@ mod tests {
         n[0x20..0x30].fill(0);
         n[0x20..0x24].copy_from_slice(b"Game");
         assert_eq!(npdm_name(&n).as_deref(), Some("Game"));
+    }
+
+    /// the 3DS family is detected by magic before the Switch package reader sees the bytes, and
+    /// every Switch shape stays out of it
+    #[test]
+    fn the_3ds_family_is_detected_by_magic() {
+        let mk = |name: &str, bytes: &[u8]| {
+            let p = std::env::temp_dir().join(format!("nxrs-build-{name}-{}", std::process::id()));
+            std::fs::write(&p, bytes).unwrap();
+            p
+        };
+        for (name, bytes) in [
+            ("cart", {
+                let mut b = vec![0u8; 0x600];
+                b[0x100..0x104].copy_from_slice(b"NCSD");
+                b
+            }),
+            ("cxi", {
+                let mut b = vec![0u8; 0x600];
+                b[0x100..0x104].copy_from_slice(b"NCCH");
+                b
+            }),
+            ("cia", {
+                let mut b = vec![0u8; 0x2020];
+                b[..4].copy_from_slice(&0x2020u32.to_le_bytes());
+                b
+            }),
+        ] {
+            let p = mk(name, &bytes);
+            assert!(is_3ds(&p).unwrap(), "{name}");
+            std::fs::remove_file(&p).unwrap();
+        }
+        for (name, bytes) in [
+            ("nsp", b"PFS0fixture".to_vec()),
+            ("nup", b"NUP\x01fixture".to_vec()),
+            ("empty", Vec::new()),
+        ] {
+            let p = mk(name, &bytes);
+            assert!(!is_3ds(&p).unwrap(), "{name}");
+            std::fs::remove_file(&p).unwrap();
+        }
     }
 
     #[test]
