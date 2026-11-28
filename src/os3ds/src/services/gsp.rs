@@ -92,9 +92,8 @@ pub fn command(host: &Host, process: &Process3ds, _tls: u32, request: &Request) 
         WRITE_HW_REGS | WRITE_HW_REGS_WITH_MASK | WRITE_HW_REG_REPEAT | READ_HW_REGS
         | IMPORT_DISPLAY_CAPTURE_INFO => {
             host.gap(format!(
-                "gsp: command {:#06x} (GPU registers/display) refused (3DS-W4); register {:#x}",
-                request.cmd,
-                request.word(0)
+                "gsp: command {:#06x} (GPU registers/display) refused (3DS-W4)",
+                request.cmd
             ));
             Reply::err(R_INVALID_CMD)
         }

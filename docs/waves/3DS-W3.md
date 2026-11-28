@@ -193,6 +193,144 @@ y2r, etc.) - that is the W4/W5 list.
 - Diff limited to `src/os3ds/`, this doc, the root member line, and (only if used) a minimal `os`
   leaf extraction.
 
+## Review of the inherited work
+
+A previous worker stopped mid-wave and left the crate uncommitted; it was committed as-is first
+(`2193ed8`, "inherited work-in-progress (checkpoint)") and then reviewed (second worker, 2026-11-28).
+
+**State.** `cargo build -p os3ds` and `cargo clippy -p os3ds` were clean (clippy: 4 style warnings in
+os3ds; the clippy *errors* in the run are `clippy::eq_op` in dependency crates, not os3ds). Every file
+of the expected-file table existed except `src/os3ds/tests/` (only in-module tests, two of them
+failing: the key parser split `touch:x,y` on `,`, and a script test asserted the wrong boolean). The
+inherited boot already passed `srv:` (W2b's park) and stopped on `svcBreak` in the APT thread.
+
+**Pinned facts in this doc that were wrong** (the code had several right; corrected against 3dbrew):
+FS command ids are `0x0801` Initialize, `0x0802` OpenFile, `0x0803` OpenFileDirectly, `0x0804`
+DeleteFile, `0x0805` RenameFile, `0x0808` CreateFile, `0x0809` CreateDirectory, `0x080B` OpenDirectory,
+`0x080C` OpenArchive, `0x080E` CloseArchive (the table above lists older/wrong ids); archive ids are
+SelfNCCH 3, SaveData 4, ExtSaveData 6, SharedExtSaveData 7, SystemSaveData 8, SDMC 9 (not "SDMC 0,
+RomFS 3"); GSP `TriggerCmdReqQueue` is `0x000C`, not `0x000B` (`0x000B` is SetLcdForceBlack); DSP
+`LoadComponent` is `0x0011` (`0x0001` is RecvData); the HID PAD section is tick `0x0`, previous tick
+`0x8`, latest index `0x10`, raw PAD `0x1C`, raw circle pad `0x20`, entries from `0x28`; touch entries
+are at `0xA8+0x20` (8 bytes: x, y, valid).
+
+**Real / stubbed / wrong / missing in the inherited code:**
+
+| Unit | Finding | Now |
+|---|---|---|
+| IPC (`hle.rs`) | header decode/encode, TLS+0x80, reply word 1 = result: right | kept |
+| srv | GetServiceHandle right; `EnableNotification` returned no semaphore (the title's srv thread waited on handle 0); `RegisterClient` answered extra translate words; unknown err:f command answered success | semaphore created; RegisterClient = result only; err:f Throw put in the gap ledger, unknown = refusal |
+| apt | state machine and ids right; lock modelled service-side (see kernel note below); `AppletUtility`, `GetProgramInfo`, `GetCaptureInfo`, `HardwareResetAsync` answered success with nothing behind them | utilities ledgered, the rest refused; parameter event consumed on ReceiveParameter; reply shape per 3dbrew (static buffer from TLS+0x184) |
+| fs | ids right; `DeleteFile/RenameFile/DeleteDirectory/RenameDirectory` answered success without doing anything (fake); `CreateDirectory` succeeded on unknown archives; a missing file opened for write was created without the create flag; RomFS without an image fell back to a *directory* session served as a file; `Write` reply lacked the byte count | delete/rename/create real on writable archives, refused on read-only; open flags honoured; SelfNCCH serves only the RomFS lowpath from the dump's IVFC level-3 range, else a gap refusal; Write returns bytes written |
+| hid | GetIPCHandles right; the input wrote only entry 0 and never advanced index/ticks; events sticky | real ring (index, tick, previous tick, pressed/released), one-shot events, a 16 ms frame clock |
+| gsp | `RegisterInterruptRelayQueue` right; no VBlank ever reached the interrupt queue (the "vblank" signal fired the event with an empty queue, only when `elapsed % 16 == 0`); GX commands drained wholesale | VBlank0/1 pushed into the queue each frame; DMA and memory fill done for real with their DMA/PSC interrupts; command list / display transfer / texture copy refused in the ledger with no completion interrupt (W4); cache/rights/QoS/priorities answered (no host action needed); register writes refused (W4) |
+| dsp | **every command id wrong** (`LoadComponent` was `0x0001`) | 3dbrew ids; address conversion, semaphore event, headphone status real; LoadComponent accepted + ledgered; pipe/semaphore traffic refused (W5) |
+| cfg | `GetConfigInfoBlk2` read size/id/pointer from the wrong words (wrote to address 0); `GetModelNintendo2DS` claimed a 2DS; config writes and serial/friend seed answered success | word order fixed, a block table (language, country, username, birthday, model, EULA, sound, backlight, parental, time offset), unknown blocks refused + ledgered; writes and console-unique data refused |
+| ptm | ids 1-6 wrong (battery level was `0x0002`, which is SetRtcAlarm) | 3dbrew ids, plausible host values, alarms refused |
+| soc / y2r / ldr:ro | wrong ids; `GetSocket`, `StartConversion`, `LoadCRO` answered success (fake) | only driver open/close answered; everything else refused + ledgered; `place_module` kept |
+| misc | every command answered success ("refused" in the text, OK in the result) | ndm:u daemon controls answered (no daemons exist headless), everything else refused |
+| kernel.rs | Connect/SendSync/Map/Unmap/Close right; `GetProcessId` (0x35) answered here (a kernel answer outside os3ds's split - runtime3ds does not answer it); wait/release probes unbounded | probes bounded to 400 lines; SignalEvent probe added; GetProcessId kept and named here for the runtime3ds owner |
+
 ## Outcome
 
-(filled in after the work)
+### Built
+
+`src/os3ds` per §9 with the fixes in the review table; `src/os3ds/tests/` (`srv_apt.rs`, `fs_paths.rs`,
+`devices.rs`, fixture in `common/mod.rs`). Commits on `3DS-W3`: `2193ed8` (checkpoint), `fcf08b4`
+(review fixes + tests), and the doc/gsp-ledger commit after it.
+
+### Tests
+
+`cargo test --release -p os3ds`: 23 passed (8 in-module + 15 in `tests/`), well under a second.
+`srv_apt`: GetServiceHandle through the real TLS+0x80 buffer (reply header `0x00050042`, session is
+`hid:USER`), unregistered name refused + ledgered, EnableNotification's single semaphore, unknown srv
+command refused, the APT lifecycle (Initialize events, Enable, Glance keeps / Receive consumes the
+Wakeup, then "no parameter"), AppletUtility ledgered. `fs_paths`: save create/write/read-back with
+open flags, delete/rename on disk (second delete is not-found), `..` escape refused, SelfNCCH RomFS
+image read + write refused + ASCII lowpath refused. `devices`: HID ring entries/index/ticks from the
+script, cfg block word order (only the block's size written) + unknown block refused, GSP DMA/memory
+fill + their interrupts + refused display transfer + VBlank pair, DSP address conversion + pipe
+refused, ldr:ro base write + LoadCRO refused. Before the fixes the inherited in-module tests had 2
+failures (key parser, wrong assertion); the cfg test passed only because it built its request in the
+same wrong word order as the code.
+
+### Verified - the headless boot
+
+Same harness and DLL as W2b (`fnv1a:782A2BA22EF1144F`), decrypted Sonic, RomFS image from the dump
+(`+0x2ab600`, `0x256c25fc` bytes), input `build/DS/W3/input.txt`, 20 s cap. Log:
+`build/DS/W3/sonic/boot.log` (+ `gaps.txt`, `input-consumed.txt`).
+
+The title now runs its whole service init through os3ds, in this order (trace lines):
+
+```
+srv: session 0x9000 -> srv:            ipc Srv cmd 0x0001 / 0x0002 (RegisterClient, EnableNotification -> semaphore 0x1003)
+srv: session 0x9001 -> APT:U           apt: GetLockHandle -> 0x9002
+apt: Initialize appID 0x300 (notification 0x1005, parameter 0x1006)
+ndm:u daemon controls 0x0014, 0x0006   srv: session 0x9005 -> fs:USER, ipc Fs cmd 0x0801
+fs: SelfNCCH RomFS -> image file 0x9007 (0x256c25fc bytes); ipc File(1) cmd 0x0802 x6 (RomFS reads)
+apt: GlanceParameter -> Wakeup         (APT thread 2)
+hid: GetIPCHandles -> shared 0x100b, 5 events; MapMemoryBlock 0x100b at 0x10000000 (Hid)
+ipc Apt cmd 0x0003 (Enable), 0x0043 (NotifyToWait), apt: ReceiveParameter -> Wakeup, AppletUtility 0x7/0x4
+fs: OpenArchive 0x7 (shared extdata f000000b), CreateFile/OpenFile "/gamecoin.dat", GetSize, Write, Close
+ipc Ptm cmd 0x000c / 0x000b (step count, step history)
+srv: gsp::Gpu; AcquireRight; RegisterInterruptRelayQueue -> 0x2a07, shared 0x1012; MapMemoryBlock at 0x10002000
+gsp WriteHWRegs x64 / WithMask x4 (refused, W4); TriggerCmdReqQueue x3 (command list + display transfer refused)
+ipc Apt cmd 0x000b (InquireNotification, APT thread) -> svcBreak thread 2 reason 0 at 0x45c824
+```
+
+Menu-proof items 1-3 hold (srv/err-free service handles for apt/fs/hid/gsp/ptm/ndm; apt
+Initialize/Enable/Glance/Receive/NotifyToWait answered; gsp RegisterInterruptRelayQueue answered).
+Item 4 holds for the handles and the mapping (hid block mapped, 3 ring entries published before the
+stop). Items 4's steady loop and 5 (scripted input consumed) are **not** reached on the committed
+tree: the boot stops at 0.2 s on the `svcBreak` above.
+
+### The boundary: a runtime3ds wait answer (out of scope, reported)
+
+The `svcBreak` is the APT thread's panic on notification type 0 (disassembly: the loop at
+`0x44AB30` calls `WaitSynchronizationN(&index, {notification, parameter, own}, 3, 0, timeout)`,
+panics on a negative result, then switches on `index`: 0 -> `InquireNotification` (`0x45409C`) ->
+the jump table at `0x44AD10`, whose entry 0 is `bl 0x330958` (panic)). The thread parked with
+`timeout Some(4294967295)` ns (RUNTIME3DS_PROBE), which `park_thread` scales to ~43 ms of host time;
+when it returns, `runtime3ds/src/lib.rs::park_wait` answers `r0 = 0x09401BFE, r1 = 0` for **every**
+parked wait - a timeout reports index 0 (the notification) instead of -1, and a signaled wake reports
+a timeout with index 0 instead of `R_OK` + the signaled handle's index (Citra/3dbrew: timeout sets
+the output to -1). Related runtime3ds kernel defects seen in the same review: an immediately
+satisfied wait does not take ownership of a mutex, decrement a semaphore or reset a one-shot event
+(`wait_ready` only tests), which is why the APT lock is modelled service-side (ledgered).
+
+Experiment (not committed; `build/DS/W3/runtime3ds-wait-experiment.diff`, reverted): with
+`park_wait` answering `R_OK` + the waking handle's index, or `0x09401BFE` + `-1` on timeout, the
+same boot runs the full 20 s with no break (`build/DS/W3/sonic-waitfix/boot.log`): GSP thread 3
+serves 1,216 VBlank waits (`WaitSynchronizationN -> 0` + `ClearEvent`, 1,216 each), the APT thread
+polls on its timeout (648 timeouts), the HID ring gets 1,216 entries and all five script steps are
+applied (`2503 ms: start`, `5008 ms: a`, ...). The main thread parks in `ArbitrateAddress` at
+`0x2A7B24` (2,430 arbiter calls) after `TriggerCmdReqQueue` submitted a process-command-list and a
+display-transfer: it waits for their completion (P3D/PPF), which only W4's PICA path can raise
+(forcing those interrupts would be a faked completion). So past the runtime3ds fix, the next gap is
+W4, and the title does not reach a loop that reads the pad before it.
+
+### Gaps summary (committed tree, `build/DS/W3/sonic/gaps.txt`)
+
+```
+[1x]  apt: the APT lock is a service-side lock (runtime3ds waits do not acquire kernel mutexes)
+[1x]  apt: AppletUtility 0x7 has no applet manager behind it (answered 0)
+[1x]  apt: AppletUtility 0x4 has no applet manager behind it (answered 0)
+[64x] gsp: command 0x0001 (GPU registers/display) refused (3DS-W4)
+[4x]  gsp: command 0x0002 (GPU registers/display) refused (3DS-W4)
+[1x]  gsp: GX process command list (1) not executed (PICA is 3DS-W4)
+[1x]  gsp: GX display transfer (3) not executed (PICA is 3DS-W4)
+```
+
+No srv/fs/hid/cfg/ptm gap: every core-service call the title made was answered for real.
+
+### Unproven / next
+
+1. **runtime3ds (owner of the kernel table):** `park_wait`'s post-wake answer (index of the signaling
+   handle + `R_OK`; `-1` + `0x09401BFE` on timeout); acquire/decrement/reset in `wait_ready`'s
+   immediate path; the `/100` timeout scaling; `GetProcessId` (0x35). The experiment diff is the
+   smallest version of the first item. With it, the APT lock can become a real kernel mutex.
+2. **W4:** GX process command list / display transfer completion (P3D/PPF interrupts), the GPU
+   register writes (`WriteHWRegs` 0x400004..0x400524 at boot). The menu logic (the loop that reads
+   HID) sits behind the main thread's wait on those completions.
+3. Input reaching the title's own logic is therefore unproven; the ring and events are tested and
+   were published 1,216 times in the experiment run.
