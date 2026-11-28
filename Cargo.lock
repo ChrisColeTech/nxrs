@@ -2074,6 +2074,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime3ds"
+version = "0.1.0"
+dependencies = [
+ "translator3ds",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

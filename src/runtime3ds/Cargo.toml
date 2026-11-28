@@ -1,0 +1,28 @@
+[package]
+name = "runtime3ds"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: the guest CPU host for 3DS titles (recomp.h v8 ABI): run loop, dispatch, memory, threads, kernel SVCs, the ARM11 interpreter"
+
+[lib]
+name = "nxrt3ds"
+path = "src/lib.rs"
+# rlib for the tests and the boot harness; staticlib (nxrt3ds.lib) is what a 3DS build links later (3DS-W3+)
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "boot3ds"
+path = "src/bin/boot3ds.rs"
+
+[dependencies]
+translator3ds = { path = "../translator3ds" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+] }
