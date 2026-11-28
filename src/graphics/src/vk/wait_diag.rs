@@ -156,11 +156,11 @@ fn observe() {
                 a.done.load(std::sync::atomic::Ordering::Acquire),
             )
         });
-        let recording = g.q.recording.load(std::sync::atomic::Ordering::Acquire);
+        let recording = g.q.after_use.try_lock().ok().map(|a| a.recording());
         let mem_free = g.mem.try_lock().is_ok();
         let images_free = g.images.try_lock().is_ok();
         let vkq_free = g.q.vkq.try_lock().is_ok();
-        crate::vklog!("wait-diag {reports}/8: last={last} done={done:?} aq(tail,done)={aq:?} recording={recording} locks_available mem={mem_free} images={images_free} vkq={vkq_free}");
+        crate::vklog!("wait-diag {reports}/8: last={last} done={done:?} aq(tail,done)={aq:?} recording={recording:?} locks_available mem={mem_free} images={images_free} vkq={vkq_free}");
         for (lane, m) in marks.iter().enumerate() {
             if let Some(m) = m {
                 crate::vklog!(
