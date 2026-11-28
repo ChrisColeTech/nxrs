@@ -303,6 +303,48 @@ mod tests {
         assert!(cond_holds(&ctx, 0xF)); // the never cond never reaches the check
     }
 
+    /// a store-multiple advances pc: the 3DS-W2b boot's clear loop repeats the same store forever
+    /// when it does not (interp::Step::Next means r15 is already at the next instruction)
+    #[test]
+    fn a_store_multiple_advances_pc() {
+        let mem = crate::mem::Memory::new().unwrap();
+        mem.map(0x0010_0000, 0x1000, crate::mem::Perm::R, crate::mem::State::Code, crate::mem::Kind::Exe)
+            .unwrap();
+        mem.map(0x0020_0000, 0x1000, crate::mem::Perm::Rw, crate::mem::State::Private, crate::mem::Kind::Heap)
+            .unwrap();
+        // 28A0500C: stmhs r0!, {r2, r3, r12, lr}
+        mem.load_bytes(0x0010_0000, &0x28A0_500Cu32.to_le_bytes());
+        let mut ctx = boxed_context();
+        ctx.r[15] = 0x0010_0000;
+        ctx.r[0] = 0x0020_0000;
+        ctx.r[2] = 0x1111_1111;
+        ctx.r[3] = 0x2222_2222;
+        ctx.r[12] = 0x3333_3333;
+        ctx.r[14] = 0x4444_4444;
+        ctx.c = 1;
+        let mut log = NoLog;
+        let mut sink = |_: &mut Context, _: u32| {};
+        let stepped = step(&mut ctx, &mem, 0x0010_0000, &mut log, &mut sink);
+        assert_eq!(stepped, Step::Next);
+        assert_eq!(ctx.r[15], 0x0010_0004, "the next instruction, not the same one");
+        assert_eq!(ctx.r[0], 0x0020_0010, "the writeback still moved the base");
+        assert_eq!(mem.read32(0x0020_0000), 0x1111_1111);
+        assert_eq!(mem.read32(0x0020_0004), 0x2222_2222);
+        assert_eq!(mem.read32(0x0020_0008), 0x3333_3333);
+        assert_eq!(mem.read32(0x0020_000C), 0x4444_4444);
+
+        // the same for a load multiple without pc in the list
+        mem.load_bytes(0x0010_0000, &0xE8B0_000Eu32.to_le_bytes());
+        let mut ctx = boxed_context();
+        ctx.r[15] = 0x0010_0000;
+        ctx.r[0] = 0x0020_0000;
+        let stepped = step(&mut ctx, &mem, 0x0010_0000, &mut log, &mut sink);
+        assert_eq!(stepped, Step::Next);
+        assert_eq!(ctx.r[15], 0x0010_0004);
+        assert_eq!((ctx.r[1], ctx.r[2], ctx.r[3]), (0x1111_1111, 0x2222_2222, 0x3333_3333));
+        assert_eq!(ctx.r[0], 0x0020_000C);
+    }
+
     pub(crate) fn boxed_context() -> Box<Context> {
         Box::new(Context {
             r: [0; 16],

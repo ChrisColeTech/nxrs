@@ -236,7 +236,7 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
         let settled = hostfast::settle(&mut state.ctx);
         process.apply_settled(state, settled);
         // a parking svc (sleep, a wait, an arbiter hold, an exit) stops this host loop's drive
-        if process.waiting_of(state.thread).is_some() {
+        if process.waiting_of(state.thread).is_some() || process.thread_exited(state.thread) {
             return SliceOutcome::Parked;
         }
     }

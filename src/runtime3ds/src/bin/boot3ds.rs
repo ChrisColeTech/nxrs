@@ -137,14 +137,13 @@ fn run(dump: &std::path::Path, out: &std::path::Path, dll: Option<String>, slice
     ] {
         memory.map(base, size, perm, state, kind).map_err(|e| format!("{base:#x}: {e}"))?;
     }
-    // the kernel configuration page: FCRAM size, APPMEMTYPE 0, the three region sizes (3dbrew
-    // FCRAM table, Memory_layout); the page is read-only to the guest, the loader pokes it
+    // the kernel configuration page: APPMEMTYPE 0, APPMEMALLOC/SYSMEMALLOC/BASEMEMALLOC from the
+    // 3dbrew FCRAM table at their documented offsets (0x30/0x40/0x44/0x48); read-only to the guest
     let poke = |address: u32, value: u32| memory.load_bytes(address, &value.to_le_bytes());
+    poke(0x1FF8_0030, 0);
     poke(0x1FF8_0040, 0x0400_0000);
-    poke(0x1FF8_0048, 0);
-    poke(0x1FF8_0058, 0x0400_0000);
-    poke(0x1FF8_005C, 0x02C0_0000);
-    poke(0x1FF8_0060, 0x0140_0000);
+    poke(0x1FF8_0044, 0x02C0_0000);
+    poke(0x1FF8_0048, 0x0140_0000);
     // the origins check for the exe: the funcs stale-mark if the memory differs from what was
     // made (the modules' check waits for W3's ldr::ro to place them)
     let stale = library.check(0, 0, |address, out| {

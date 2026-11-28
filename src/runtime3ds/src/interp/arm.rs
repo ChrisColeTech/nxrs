@@ -727,6 +727,7 @@ fn multiple_transfer(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32,
     if loaded_pc {
         Step::Taken
     } else {
+        ctx.r[15] = address + 4;
         Step::Next
     }
 }

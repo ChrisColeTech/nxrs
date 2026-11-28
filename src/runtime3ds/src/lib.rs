@@ -71,6 +71,8 @@ enum Object {
     Arbiter(usize),
     MemBlock(usize),
     Timer(usize),
+    /// the process itself (the `0xFFFF8001` pseudo handle, duplicated)
+    Process,
 }
 
 struct Mutex3ds {
@@ -335,6 +337,16 @@ impl Process3ds {
         self.interp_starts.lock().unwrap().iter().map(|&(_, count)| count).sum()
     }
 
+    /// has this guest thread ended (ExitThread or its entry returned)
+    pub fn thread_exited(&self, index: usize) -> bool {
+        let kernel = self.kernel.lock().unwrap();
+        kernel
+            .threads
+            .get(index)
+            .and_then(|t| t.as_ref())
+            .is_some_and(|t| t.state.lock().unwrap().exited)
+    }
+
     /// the wait a thread's kernel record names, if any (a running thread is not waiting)
     pub fn waiting_of(&self, thread: usize) -> Option<Waiting> {
         let kernel = self.kernel.lock().unwrap();
@@ -469,6 +481,7 @@ impl Process3ds {
         // safe: the process outlives the boot, which waits on every thread before returning
         let mut state = ThreadState::new(process, index, tls);
         let ctx = &mut state.ctx;
+        ctx.r[0] = arg;
         ctx.r[13] = stack_top;
         ctx.r[14] = 0xFFFF_FFFF;
         ctx.r[15] = entry;
@@ -525,6 +538,12 @@ impl Process3ds {
 
     /// parks the calling thread (its own host thread) for the wait; wakes when it ends
     pub fn park_thread(&self, index: usize, waiting: Waiting, ns: Option<u64>) {
+        static PROBE_PARKS: AtomicU64 = AtomicU64::new(0);
+        if std::env::var_os("RUNTIME3DS_PROBE").is_some()
+            && PROBE_PARKS.fetch_add(1, Ordering::Relaxed) < 12
+        {
+            self.say(format!("probe park thread {index}: {waiting:?} timeout {ns:?}"));
+        }
         let Some(thread) = self.thread_of(index) else { return };
         {
             let mut run = thread.state.lock().unwrap();
@@ -755,15 +774,15 @@ impl Process3ds {
         }
     }
 
-    /// svc ArbitrateAddress wait forms: park at the address until a signal (or pass if it
-    /// already holds)
+    /// svc ArbitrateAddress wait forms: park at the address while its word is below `value`
+    /// (after the optional decrement); 3dbrew Multi-threading §ArbitrateAddress
     pub fn park_arbiter(&self, thread: usize, handle: u32, address: u32, value: u32, decrement: bool, timeout: Option<u64>) {
         let current = self.memory.read32(address);
-        let passes = current.wrapping_sub(decrement as u32) < value;
+        let word = if decrement { current.wrapping_sub(1) } else { current };
         if decrement {
-            self.memory.write32(address, current.wrapping_sub(1));
+            self.memory.write32(address, word);
         }
-        if passes {
+        if (word as i32) >= (value as i32) {
             return;
         }
         {
@@ -820,8 +839,13 @@ impl Process3ds {
         self.kernel.lock().unwrap().handles.remove(&handle).is_some()
     }
 
-    pub fn duplicate_handle(&self, handle: u32) -> Option<u32> {
-        let object = *self.kernel.lock().unwrap().handles.get(&handle)?;
+    pub fn duplicate_handle(&self, handle: u32, thread: usize) -> Option<u32> {
+        // 0xFFFF8000 / 0xFFFF8001 are the kernel's aliases for the calling thread and process
+        let object = match handle {
+            0xFFFF_8000 => Object::Thread(thread),
+            0xFFFF_8001 => Object::Process,
+            _ => *self.kernel.lock().unwrap().handles.get(&handle)?,
+        };
         let mut kernel = self.kernel.lock().unwrap();
         let copy = kernel.next_handle;
         kernel.next_handle += 1;
@@ -837,6 +861,7 @@ impl Process3ds {
             Some(reason) if reason.contains("svcBreak") => Stop::Break(reason),
             Some(reason) if reason.contains("instruction cap") => Stop::Ticks,
             Some(reason) if reason.contains("wall clock") => Stop::Time,
+            Some(reason) if reason.contains("every guest thread ended") => Stop::Idle,
             Some(other) => Stop::Break(other),
             None => Stop::Idle,
         };
