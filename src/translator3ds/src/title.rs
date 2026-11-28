@@ -336,7 +336,12 @@ mod tests {
     /// the content is the tiniest .cxi (content 0 of a game CIA is the exe's NCCH partition),
     /// code is its .code bytes, encrypted sets the record's type bit 0
     fn cia(code: &[u8], encrypted: bool) -> Vec<u8> {
-        let content = crate::rom::tests::rom_bytes(code, &[]);
+        cia_content(&crate::rom::tests::rom_bytes(code, &[]), encrypted)
+    }
+
+    /// the same .cia around whole content bytes (the staging fixtures pass a .cxi that carries
+    /// its own `.icon`)
+    fn cia_content(content: &[u8], encrypted: bool) -> Vec<u8> {
         let mut out = vec![0u8; 0x2020];
         out[..4].copy_from_slice(&0x2020u32.to_le_bytes());
         // content bitmap: content 0 present; cert and ticket sizes stay 0
@@ -416,6 +421,46 @@ mod tests {
             .unwrap()
             .iter()
             .any(|m| m.contains("is current")),);
+        drop(game);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// the same staging through a .cia container: open walks the TMD to content 0, write_data
+    /// stages from there
+    #[test]
+    fn a_cia_stages_like_a_cart() {
+        use crate::rom::tests::{rom_bytes_icon, smdh};
+
+        let icon = smdh("Cia", "Cia Long", "nxrs", 0x001F);
+        let content = rom_bytes_icon(
+            &words(&[0xE3A0_0000, 0xE12F_FF1E]),
+            &[("static.crs", b"crs")],
+            Some(&icon),
+        );
+        let bytes = cia_content(&content, false);
+        let path = std::env::temp_dir().join(format!(
+            "translator3ds-stage-cia-{}.cia",
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let game = open(&path).unwrap();
+        assert_eq!(game.kind, DsKind::Cia);
+        let data = std::env::temp_dir().join(format!(
+            "translator3ds-stage-cia-data-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&data).ok();
+        std::fs::create_dir_all(&data).unwrap();
+        game.write_data(&data, &|_| {}).unwrap();
+        assert_eq!(
+            std::fs::read(data.join("exefs/code")).unwrap(),
+            game.title.code().unwrap()
+        );
+        assert_eq!(std::fs::read(data.join(CONTROL)).unwrap(), icon);
+        assert_eq!(std::fs::read(data.join("romfs/static.crs")).unwrap(), b"crs");
+        let record = std::fs::read_to_string(data.join("romfs.source")).unwrap();
+        assert!(record.contains("marker romfs.ds"), "{record}");
         drop(game);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(&data).unwrap();

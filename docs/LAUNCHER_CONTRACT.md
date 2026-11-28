@@ -122,6 +122,16 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
 | Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
+
+**3DS inputs** (3DS-W1): `<source>` also accepts a decrypted 3DS dump — `.3ds` (NCSD at 0x100), `.cia`
+(0x2020 at 0; the game's executable is content index 0), `.cxi`/`.app` (NCCH at 0). Translated and staged
+with `--no-build`: `<buildDir>\<name>_data\` gets `exefs\` (`code` — the decompressed `.code` — and
+`exheader.bin`), `romfs\` (extracted), `control.smdh` (the ExeFS `.icon`: SMDH icons + titles; the launcher
+decodes the 48x48 icon for the card) and `romfs.source` (line 1 the dump, `marker romfs.ds`, then the
+`extracted` / `stamp` rows as for Switch). Decrypted dumps need no keys; an encrypted dump is refused with
+`the dump is encrypted, it has to be decrypted first` (3DS keys are not nxrs's prod.keys; no decryption lane
+yet). Without `--no-build` the build says the 3DS engine runtime is not built yet (translate-only waves) and
+exits 1 — no `.exe`, no `<name>_code.dll`.
 | Build > Web | the same with `--outdir <webDir>`, then `--shaders-from <buildDir>\<name>_data` (when the game has a build folder) and `--target web` last (`model::args::build_web`); below |
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |

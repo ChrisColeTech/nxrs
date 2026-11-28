@@ -92,4 +92,63 @@ GPU: n/a (no game runs, no play.py, no relink; `%LOCALAPPDATA%\nxrs` untouched).
 
 ## Outcome
 
-(filled at the end of the wave)
+**Done, on branch `3DS-W1`.** All six brief items landed (commits `36c0aec`, `9bf9718`, `da740c9`,
+`84d8457`, plus the final hunk commit); suites green: `cargo test -p translator3ds` (74 lib + 1
+real-title skip + 6 synthetic + 1 doc), `cargo test -p translator` (73 + integrations), root default
+suite `cargo test --workspace --exclude renhdrum` (0 failures across every crate), launcher
+`cargo test` (55 lib + integration crates) and `cargo clippy --all-targets -- -D warnings` clean.
+
+**Real .3ds (Sonic Generations USA, Decrypted, 652 MB)**: `nxrs-build build ... --no-build` stages
+`Sonic_data\`: `exefs\code` (4,214,784 bytes) + `exefs\exheader.bin` (1024), `romfs\` (22 files,
+627,842,669 bytes), `control.smdh` (14,016 bytes, magic `SMDH`), `romfs.source` (`marker romfs.ds`).
+`C generated: 178/178 chunks (8s)`, `C code: 178 files, 215.5 MB, 15283 functions`; a second run says
+`(unchanged since the last build)` / `romfs/ is current` — both currency paths proven. **RomFS
+cross-check: IDENTICAL** — the donor's own `rom.rs` (scratch binary path-depending on
+`D:\Projects\3dsrecomp` at `d143f2c5`, outside the repo) yields the same 22 files path-for-path and
+size-for-size as the staged tree (`sonic-romfs-donor.txt` vs `sonic-romfs-staged.txt`). The staged
+SMDH decodes: Japanese short ` ジェネレーションズ`, English short `C GENERATIONS`, real RGB565 pixel
+data at 0x2480. The launcher's service-layer test imports the same file (`valid_source` +
+`game_from_source` + `add` into a temp library).
+
+**Real .cia (Pokemon Moon USA RF Retail, 3.2 GB)**: the container walk runs exactly as the donor's
+`cia_executable` does (header → cert/ticket sizes → TMD at 0x2DC0, signature 0x140, 2 content
+records after the 64 content-chunk records; content 0 at 0x3940; NCCH magic found at +0x100), and
+the dump **is retail-encrypted**: content 0's NCCH flags read `flags[3]=1, flags[7]=0` (no NoCrypto,
+7.0+ key method), so the build refuses with the donor's exact line
+`Cannot load the game: the dump is encrypted, it has to be decrypted first`, exit 1
+(`moon-real-build.log`). That is the behaviour plan §2 specifies for encrypted dumps ("not
+implemented in the first waves; nxrs says the same refusal line until the owner decides a decryption
+lane") — the brief's named title cannot itself demonstrate staging (see Questions). The .cia path's
+full staging is proven instead by: the synthetic decrypted .cia through the real CLI
+(`moon-fixture-build.log`: translate 2 chunks, stages `exefs\`, `romfs\static.crs`, `control.smdh`,
+`romfs.source`) and the crate tests (`a_cia_stages_like_a_cart`, plus the container-walk parity the
+launcher's `cia()` reader now mirrors, TMD offsets byte-identical to the donor's formula).
+
+**Findings**: (1) the ExeFS icon entry is named `icon` (no dot; 3dbrew's ExeFS names), not `.icon` —
+rom.rs accepts both. (2) The donor's CIA reader walks 64×0x24 content-chunk records before the
+content records; the launcher's `cia()` gate now walks them identically (its first version did not
+and refused the real file).
+
+**Deviations from the plan's letter** (each small, each recorded):
+- `constants/engine.rs::BUILD_ICONS` gained `control.smdh` — not in the brief's file list, but the
+  W1 row's "launcher imports … with SMDH card art" needs `build_cover` to reach the staged file.
+- `services/sources3ds_tests.rs` is a new test file (the brief named `sources_tests.rs`, which sits
+  at 234 of its 250-line cap; the launcher's style rules are hard limits — split, not bend).
+- `Cargo.lock` (root) carries the `translator3ds → translator` and `nxrs-cli → translator3ds` edges.
+- The gen key hashes the programs' bytes + hints; no patch text or profile inputs exist on the 3DS
+  branch yet (W6 owns profiles).
+
+**Slip (caught and corrected)**: `cargo fmt -p translator3ds` was run once to tidy the new test and
+reflowed the whole crate, including W0's vendored donor files (whose hash-fidelity W0 records).
+`git checkout HEAD -- src/translator3ds` restored the committed vendored state; only the intended
+rom.rs hunks and the title.rs .cia staging test were re-applied (the current diff touches exactly
+`rom.rs` and `title.rs`). The vendored files stay in the donor's style, as W0 shipped them; rustfmt
+is not clean over the crate — the same state W0 merged.
+
+**Unproven**: staging through a *real decrypted .cia* (the brief's file is encrypted; a decryption
+lane is plan §10 D2, owner-owned); the staged data folder has not been *run* (W2 owns the runtime);
+`discovered.tsv` hints reading has no real producer yet; SMDH titles are decoded and returned but
+not wired into any launcher display (no surface owns them this wave); `romfs.bin` fallback does not
+exist for 3DS titles whose RomFS names a Windows folder cannot hold — such a title refuses the
+extraction with the extract message (a Switch build writes `romfs.bin` from its image backend; a
+3DS build's `Stored` backend has none — reported per the brief's hypothesis clause, not forced).

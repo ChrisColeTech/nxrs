@@ -277,7 +277,7 @@ pub struct Title {
     pub exheader_raw: Vec<u8>,
     /// where .code sits in the dump, and its size
     code: (u64, u64),
-    /// where the ExeFS .icon (an SMDH) sits, and its size
+    /// where the ExeFS `icon` (an SMDH) sits, and its size
     icon: Option<(u64, u64)>,
     pub romfs: Option<RomFs>,
 }
@@ -349,7 +349,7 @@ impl Title {
                 "the dump is encrypted, it has to be decrypted first (the ExeFS has no .code)".into()
             })
         })?;
-        let icon = entry(".icon");
+        let icon = entry("icon").or_else(|| entry(".icon"));
 
         let romfs = if has_romfs { read_romfs(&blob, romfs_offset).ok() } else { None };
         Ok(Title { blob, program_id, exheader, exheader_raw, code, icon, romfs })
@@ -380,7 +380,8 @@ impl Title {
         self.read(romfs.data + file.data_offset + offset, len).ok()
     }
 
-    /// the ExeFS `.icon` (an SMDH: the card's icons and titles), when the title carries one
+    /// the ExeFS `icon` (an SMDH: the card's icons and titles), when the title carries one
+    /// (the ExeFS names it `icon`; some tools spell it `.icon`)
     pub fn icon(&self) -> Option<Vec<u8>> {
         let (offset, size) = self.icon?;
         self.read(offset, size as usize).ok()
