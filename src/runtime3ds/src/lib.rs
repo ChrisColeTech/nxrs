@@ -116,15 +116,23 @@ pub struct Process3ds {
     pub stats: Stats3ds,
     cache_ops: AtomicU64,
     tick_counter: AtomicU64,
+    /// the bump pointer in the LINEAR window (0x14000000..0x1C000000), for addr0 = 0 requests
+    linear_next: AtomicU64,
     /// the hot-set / miss recorder
     pub recorder: Arc<prof::Recorder>,
     gaps: Mutex<Vec<(String, u64)>>,
+    /// every svc run, by number and result, with counts (the boot's svc ledger)
+    svc_log: Mutex<Vec<(u32, u32, u64)>>,
+    /// interpreter block starts, with counts (where the recompiled code had no entry)
+    interp_starts: Mutex<Vec<(u32, u64)>>,
     log: Mutex<Vec<String>>,
     stop: Mutex<Option<String>>,
     options: BootOptions,
     scheduler: &'static dyn thread::Scheduler,
     /// the boot's start, for the wall clock cap
     began: std::time::Instant,
+    /// host threads that have returned (the boot waits for them before it reports)
+    finished: AtomicU64,
 }
 
 // safe: the process is shared with the guest threads through the ThreadStates; everything
@@ -164,6 +172,10 @@ pub struct BootReport {
     pub svcs: u64,
     /// the gap lines, deduped, with counts
     pub gaps: Vec<(String, u64)>,
+    /// the svcs run, by number and r0 result, with counts
+    pub svcs_seen: Vec<(u32, u32, u64)>,
+    /// interpreter block starts, with counts
+    pub interp_starts: Vec<(u32, u64)>,
     /// the boot log (entry, threads, svc Breaks, OutputDebugString)
     pub log: Vec<String>,
     /// threads that were created and ran at least one slice
@@ -198,13 +210,17 @@ impl Process3ds {
             stats: Stats3ds::default(),
             cache_ops: AtomicU64::new(0),
             tick_counter: AtomicU64::new(0),
+            linear_next: AtomicU64::new(0x1400_0000),
             recorder: Arc::new(prof::Recorder::new()),
             gaps: Mutex::new(Vec::new()),
+            svc_log: Mutex::new(Vec::new()),
+            interp_starts: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
             stop: Mutex::new(None),
             options,
             scheduler: &thread::NoScheduler,
             began: std::time::Instant::now(),
+            finished: AtomicU64::new(0),
         }
     }
 
@@ -218,9 +234,28 @@ impl Process3ds {
         self.tick_counter.fetch_add(slice, Ordering::Relaxed)
     }
 
+    /// svcControlMemory LINEAR with addr0 = 0: bump inside the 0x14000000..0x1C000000 window
+    /// (already mapped Rw as one region; the kernel picks the address and the title uses it)
+    pub fn alloc_linear(&self, size: u32) -> Option<u32> {
+        let size = size.next_multiple_of(0x1000) as u64;
+        loop {
+            let current = self.linear_next.load(Ordering::Relaxed);
+            let next = current.checked_add(size)?;
+            if next > 0x1C00_0000 {
+                return None;
+            }
+            if self
+                .linear_next
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(current as u32);
+            }
+        }
+    }
+
     /// has the boot stopped, and why
-    pub fn stopped(&self) -> bool {
-        self.stop.lock().unwrap().is_some()
+    pub fn stopped(&self) -> bool {        self.stop.lock().unwrap().is_some()
     }
 
     fn stop_reason(&self) -> Option<String> {
@@ -264,12 +299,51 @@ impl Process3ds {
         prof::Handle::new(&self.recorder)
     }
 
-    /// the wait a thread's kernel record names, if any
+    /// one line in the svc ledger (number, r0 result after the handler)
+    pub fn note_svc(&self, number: u32, result: u32) {
+        let mut log = self.svc_log.lock().unwrap();
+        for (known_number, known_result, count) in log.iter_mut() {
+            if *known_number == number && *known_result == result {
+                *count += 1;
+                return;
+            }
+        }
+        log.push((number, result, 1));
+    }
+
+    /// notes an interpreter block start (the uncovered code's address)
+    pub fn note_interp(&self, address: u32) {
+        self.recorder.hint(address);
+        let mut log = self.interp_starts.lock().unwrap();
+        for (known, count) in log.iter_mut() {
+            if *known == address {
+                *count += 1;
+                return;
+            }
+        }
+        log.push((address, 1));
+    }
+
+    /// the wait a thread's kernel record names, if any (a running thread is not waiting)
     pub fn waiting_of(&self, thread: usize) -> Option<Waiting> {
         let kernel = self.kernel.lock().unwrap();
         let thread = kernel.threads.get(thread).and_then(|t| t.as_ref())?;
         let run = thread.state.lock().unwrap();
-        (!run.exited).then_some(run.waiting)
+        if run.exited || run.waiting == Waiting::None {
+            return None;
+        }
+        Some(run.waiting)
+    }
+
+    /// a thread's pc, budget and state, for the boot log (None while it has not started)
+    pub fn thread_pc(&self, index: usize) -> Option<(u32, i32, u8)> {
+        let kernel = self.kernel.lock().unwrap();
+        let thread = kernel.threads.get(index).and_then(|t| t.as_ref())?;
+        let run = thread.state.lock().unwrap();
+        let state = run.state?;
+        // safe: the state stays at its heap address for the thread's whole life
+        let state = unsafe { &*state };
+        Some((state.ctx.r[15], state.ctx.budget, state.ctx.thumb))
     }
 
     /// the svcs the code answered itself, added up from the settles
@@ -768,6 +842,8 @@ impl Process3ds {
             miss_sites: misses.len(),
             svcs: self.stats.svcs.load(Ordering::Relaxed),
             gaps: self.gaps.lock().unwrap().clone(),
+            svcs_seen: self.svc_log.lock().unwrap().clone(),
+            interp_starts: self.interp_starts.lock().unwrap().clone(),
             log: self.log.lock().unwrap().clone(),
             threads_ran: self.threads_ran(),
             ticks_answered_in_place: self.stats.ticks_answered_in_place.load(Ordering::Relaxed),
@@ -794,8 +870,16 @@ impl Process3ds {
     }
 }
 
-/// the host thread's loop for one guest thread: slices, parks, exits
+/// the host thread's loop for one guest thread: slices, parks, exits; the boot waits on the
+/// finished count before it reports, so the process outlives every running thread
 fn thread_main(process_ptr: usize, index: usize) {
+    thread_loop(process_ptr, index);
+    // safe: the process outlives the boot (start waits on this count)
+    let process: &Process3ds = unsafe { &*(process_ptr as *const Process3ds) };
+    process.finished.fetch_add(1, Ordering::Release);
+}
+
+fn thread_loop(process_ptr: usize, index: usize) {
     // safe: the process outlives the boot (start waits on it), the ThreadState stays put
     let process: &Process3ds = unsafe { &*(process_ptr as *const Process3ds) };
     let state_ptr = {
@@ -883,7 +967,29 @@ pub fn start(process: &Process3ds, program_id: u64, entry: u32, stack_top: u32, 
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    // give the guest threads a moment to notice, then report
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // wait for the guest threads to notice the stop and leave their slice; the process (its
+    // Library included) must outlive them, so the report comes after the join
+    let wait = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_report = std::time::Instant::now();
+    loop {
+        let total = process.kernel.lock().unwrap().threads.len() as u64;
+        if process.finished.load(Ordering::Acquire) >= total {
+            break;
+        }
+        if last_report.elapsed() >= std::time::Duration::from_secs(1) {
+            last_report = std::time::Instant::now();
+            for index in 0..total as usize {
+                if let Some((pc, budget, thumb)) = process.thread_pc(index) {
+                    process.say(format!("thread {index} still at {pc:#x} (thumb {thumb}, budget {budget})"));
+                }
+            }
+        }
+        if std::time::Instant::now() > wait {
+            process.say("some guest threads were still running at the report".to_owned());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
     Ok(process.report(program_id, format!("{}", process.library.lock().unwrap().describe())))
 }

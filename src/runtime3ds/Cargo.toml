@@ -6,9 +6,9 @@ license = "MIT"
 description = "RecompLauncher engine: the guest CPU host for 3DS titles (recomp.h v8 ABI): run loop, dispatch, memory, threads, kernel SVCs, the ARM11 interpreter"
 
 [lib]
-name = "nxrt3ds"
+name = "runtime3ds"
 path = "src/lib.rs"
-# rlib for the tests and the boot harness; staticlib (nxrt3ds.lib) is what a 3DS build links later (3DS-W3+)
+# rlib for the tests and the boot harness; staticlib is what a 3DS build links later (3DS-W3+)
 crate-type = ["rlib", "staticlib"]
 
 [[bin]]

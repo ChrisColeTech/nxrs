@@ -23,6 +23,11 @@ pub(crate) static HOST: context::Host = context::Host {
     svc: svc::svc_callback,
 };
 
+/// the host callbacks a hand-driven context needs (the tests drive single threads directly)
+pub fn host() -> &'static context::Host {
+    &HOST
+}
+
 unsafe extern "C" fn cb_read8(ctx: *mut Context, address: u32) -> u8 {
     unsafe { ThreadState::of(ctx).process().memory.read8(address) }
 }
@@ -130,6 +135,7 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
             }
         } else {
             // uncovered code: the interpreter runs until it reaches an entry or the budget ends
+            process.note_interp(state.ctx.r[15]);
             let mut miss_log = process.miss_log();
             let lookup = |address: u32| process.library.lock().unwrap().lookup(address);
             let mut sink = |c: &mut Context, number: u32| {

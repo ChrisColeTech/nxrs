@@ -3,7 +3,7 @@
 //! reads for the next build) and `<data>\hotset.txt` (the miss counts, W7's websplit side).
 
 use crate::interp::MissLog;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 struct Miss {
@@ -13,11 +13,13 @@ struct Miss {
 
 pub struct Recorder {
     misses: Mutex<BTreeMap<u32, Miss>>,
+    /// addresses the interpreter ran from with no recompiled entry (hints for the next build)
+    hints: Mutex<BTreeSet<u32>>,
 }
 
 impl Recorder {
     pub fn new() -> Recorder {
-        Recorder { misses: Mutex::new(BTreeMap::new()) }
+        Recorder { misses: Mutex::new(BTreeMap::new()), hints: Mutex::new(BTreeSet::new()) }
     }
 
     fn record(&self, address: u32, why: &str) {
@@ -27,6 +29,11 @@ impl Recorder {
         if miss.why != why {
             miss.why.push_str(&format!("; {why}"));
         }
+    }
+
+    /// an address the interpreter had to run: a function seed for the next build's hints
+    pub fn hint(&self, address: u32) {
+        self.hints.lock().unwrap().insert(address & !1);
     }
 
     /// addresses with misses, ascending
@@ -43,14 +50,17 @@ impl Recorder {
         self.misses.lock().unwrap().values().map(|m| m.count).sum()
     }
 
-    /// the hints file: one address per line, bit 0 set for Thumb
+    /// the hints file: one address per line, bit 0 set for Thumb; the miss sites and the
+    /// addresses the interpreter ran from (so the next build covers both)
     pub fn write_hints(&self, path: &std::path::Path) -> std::io::Result<usize> {
+        let mut sites: BTreeSet<u32> = self.misses.lock().unwrap().keys().copied().collect();
+        sites.extend(self.hints.lock().unwrap().iter().copied());
         let mut text = String::new();
-        for &(address, _, _) in &self.addresses() {
+        for address in &sites {
             text.push_str(&format!("0x{address:08X}\n"));
         }
         std::fs::write(path, text)?;
-        Ok(self.addresses().len())
+        Ok(sites.len())
     }
 
     /// the hot-set file: address (bit 0 Thumb) and the miss count per line

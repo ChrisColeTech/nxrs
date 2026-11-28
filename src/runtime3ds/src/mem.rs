@@ -96,6 +96,8 @@ impl Region {
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
     pub faults: u64,
+    /// the last faulting address (the boot log's first suspect)
+    pub last_fault: u32,
     pub mmio_reads: u64,
     pub mmio_writes: u64,
     pub watched_writes: u64,
@@ -195,6 +197,26 @@ impl Memory {
         Ok(())
     }
 
+    /// svcControlMemory COMMIT: a range already held by one mapping changes state/perm in place
+    /// (the title committing pages of its reserved heap), otherwise it becomes a fresh mapping
+    pub fn commit(&self, base: u32, size: u32, perm: Perm, state: State, kind: Kind) -> Result<(), String> {
+        if size != 0 {
+            let end = base.wrapping_add(size - 1);
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(region) = inner
+                .regions
+                .iter_mut()
+                .find(|r| r.contains(base) && end.wrapping_sub(r.base) < r.size)
+            {
+                region.perm = perm;
+                region.state = state;
+                region.kind = kind;
+                return Ok(());
+            }
+        }
+        self.map(base, size, perm, state, kind)
+    }
+
     /// unmaps; empties the tables' entries for it (legal from svc, the boundary the ABI names)
     pub fn unmap(&self, base: u32, size: u32) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
@@ -275,6 +297,7 @@ impl Memory {
         let group_base = unsafe { self.base.add(first as usize * PAGE as usize) };
         if windows_commit(group_base, (GROUP_PAGES * PAGE) as usize).is_none() {
             inner.stats.faults += 1;
+            
             return Some(region);
         }
         for page in first..first + GROUP_PAGES {
@@ -307,7 +330,9 @@ impl Memory {
     /// the read8 callback of the Host struct
     pub fn read8(&self, address: u32) -> u8 {
         let Some(region) = self.region(address) else {
-            self.inner.lock().unwrap().stats.faults += 1;
+            let mut inner = self.inner.lock().unwrap();
+            inner.stats.faults += 1;
+            inner.stats.last_fault = address;
             return 0;
         };
         if region.kind == Kind::Mmio {
@@ -317,7 +342,9 @@ impl Memory {
         if !self.readable(address) {
             self.ensure_commit(address);
             if !self.readable(address) || !region.perm.readable() {
-                self.inner.lock().unwrap().stats.faults += 1;
+                let mut inner = self.inner.lock().unwrap();
+                inner.stats.faults += 1;
+                inner.stats.last_fault = address;
                 return 0;
             }
         }
@@ -342,6 +369,7 @@ impl Memory {
     pub fn write8(&self, address: u32, value: u8) {
         let Some(region) = self.region(address) else {
             self.inner.lock().unwrap().stats.faults += 1;
+            
             return;
         };
         if region.kind == Kind::Mmio {
@@ -352,11 +380,13 @@ impl Memory {
             self.ensure_commit(address);
             if !self.readable(address) {
                 self.inner.lock().unwrap().stats.faults += 1;
+            
                 return;
             }
         }
         if !region.perm.writable() {
             self.inner.lock().unwrap().stats.faults += 1;
+            
             return;
         }
         if region.kind == Kind::Vram {
@@ -402,6 +432,21 @@ impl Memory {
     pub fn write_bytes(&self, address: u32, bytes: &[u8]) {
         for (i, &byte) in bytes.iter().enumerate() {
             self.write8(address.wrapping_add(i as u32), byte);
+        }
+    }
+
+    /// the loader's privilege: code lands in read-only regions, this writes the backing the way
+    /// the kernel maps a title's segments
+    pub fn load_bytes(&self, address: u32, bytes: &[u8]) {
+        let end = address.wrapping_add(bytes.len() as u32);
+        let mut page = address & !(PAGE - 1);
+        while page < end {
+            self.ensure_commit(page);
+            page = page.wrapping_add(PAGE);
+        }
+        for (i, &byte) in bytes.iter().enumerate() {
+            // safe: the region's backing is committed, the loader is privileged
+            unsafe { *self.page_at(address.wrapping_add(i as u32)) = byte };
         }
     }
 }

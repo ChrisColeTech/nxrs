@@ -65,6 +65,7 @@ pub fn dispatch(process: &Process3ds, state: &mut ThreadState, number: u32) {
         }
     }
     kernel(process, state, number);
+    process.note_svc(number, state.ctx.r[0]);
 }
 
 /// the kernel table (3dbrew SVC + Kernel ABI, the pinned forms in docs/waves/3DS-W2.md)
@@ -77,15 +78,36 @@ fn kernel(process: &Process3ds, state: &mut ThreadState, number: u32) {
             let (op, addr0, _addr1, size, _perms) = (ctx.r[0], ctx.r[1], ctx.r[2], ctx.r[3], ctx.r[4]);
             let operation = op & 0xFF;
             match operation {
-                // COMMIT / COMMIT|LINEAR / FREE
+                // COMMIT / COMMIT|LINEAR
                 3 if op & 0x10000 == 0 => {
                     ctx.r[1] = addr0;
-                    ctx.r[0] = map_result(process, addr0, size, Perm::Rw, State::Private, Kind::Heap);
+                    ctx.r[0] = commit_result(process, addr0, size, State::Private, Kind::Heap);
                 }
                 3 => {
-                    // LINEAR: the 0x14000000 window, phys = vaddr - 0x0C000000 on this host
+                    // LINEAR: the 0x14000000 window; addr0 = 0 asks the kernel to pick one
+                    if addr0 == 0 {
+                        match process.alloc_linear(size) {
+                            Some(base) => {
+                                ctx.r[1] = base;
+                                ctx.r[0] = R_OK;
+                                process.say(format!("linear alloc {size:#x} at {base:#x}"));
+                            }
+                            None => {
+                                ctx.r[1] = 0;
+                                ctx.r[0] = R_INVALID;
+                            }
+                        }
+                    } else {
+                        ctx.r[1] = addr0;
+                        ctx.r[0] = commit_result(process, addr0, size, State::Continuous, Kind::Linear);
+                    }
+                }
+                // RESERVE: the pages are held by the process but not usable until committed
+                2 => {
                     ctx.r[1] = addr0;
-                    ctx.r[0] = map_result(process, addr0, size, Perm::Rw, State::Continuous, Kind::Linear);
+                    let state = if op & 0x10000 != 0 { State::Continuous } else { State::Reserved };
+                    let kind = if op & 0x10000 != 0 { Kind::Linear } else { Kind::Heap };
+                    ctx.r[0] = map_result(process, addr0, size, Perm::Rw, state, kind);
                 }
                 1 => {
                     let freed = process.memory.unmap(addr0, size).is_ok();
@@ -96,6 +118,14 @@ fn kernel(process: &Process3ds, state: &mut ThreadState, number: u32) {
                     process.gap(&format!("svc {number:#04x} ControlMemory op {op:#x} at site {:#x}", ctx.r[15]));
                     ctx.r[0] = R_STUB;
                 }
+            }
+            if ctx.r[0] != R_OK {
+                process.gap(&format!(
+                    "ControlMemory refused: op {op:#x} addr {addr0:#x} size {size:#x} -> {:#010x} at {:#x} (return {:#x})",
+                    ctx.r[0],
+                    ctx.r[15],
+                    ctx.r[14]
+                ));
             }
         }
         // QueryMemory: r0 MemoryInfo*, r1 PageInfo*, r2 addr
@@ -380,6 +410,25 @@ fn kernel(process: &Process3ds, state: &mut ThreadState, number: u32) {
             process.memory.write32(out, id);
             ctx.r[0] = R_OK;
         }
+        // GetResourceLimit: r0 Handle* out, r1 process handle -> a limit object handle
+        0x38 => {
+            process.memory.write32(ctx.r[0], RESOURCE_LIMIT_HANDLE);
+            ctx.r[0] = R_OK;
+        }
+        // GetResourceLimitLimitValues / CurrentValues: r0 s64* values, r1 handle,
+        // r2 LimitableResource* names, r3 count
+        0x39 | 0x3A => {
+            let (out, names_at, count) = (ctx.r[0], ctx.r[2], ctx.r[3].min(16));
+            for i in 0..count {
+                let name = process.memory.read32(names_at.wrapping_add(4 * i));
+                // the limits roughly match the exheader's application category; the current
+                // values start at zero (nothing is held yet)
+                let value: u64 = if number == 0x39 { resource_limit(name) } else { 0 };
+                process.memory.write32(out.wrapping_add(8 * i), value as u32);
+                process.memory.write32(out.wrapping_add(8 * i + 4), (value >> 32) as u32);
+            }
+            ctx.r[0] = R_OK;
+        }
         // Break: the guest's assert; the boot stops cleanly with the reason
         0x3C => {
             let reason = ctx.r[0];
@@ -457,8 +506,30 @@ fn state_of(state: State) -> u32 {
     }
 }
 
+/// the handle GetResourceLimit hands out (no object behind it; the value svcs answer from the table)
+const RESOURCE_LIMIT_HANDLE: u32 = 0x0000_2000;
+
+/// a LimitableResource's limit (libctru's `LimitableResource`: priority, commit bytes, threads,
+/// events, mutexes, semaphores, timers, shared memory, arbiters, CPU time)
+fn resource_limit(name: u32) -> u64 {
+    match name {
+        0 => 0x18,
+        1 => 0x0400_0000,
+        2..=8 => 0x40,
+        _ => 0x1000,
+    }
+}
+
 fn map_result(process: &Process3ds, base: u32, size: u32, perm: Perm, state: State, kind: Kind) -> u32 {
     match process.memory.map(base, size, perm, state, kind) {
+        Ok(()) => R_OK,
+        Err(_) => R_INVALID,
+    }
+}
+
+/// ControlMemory COMMIT: succeeds inside an existing mapping or as a new one
+fn commit_result(process: &Process3ds, base: u32, size: u32, state: State, kind: Kind) -> u32 {
+    match process.memory.commit(base, size, Perm::Rw, state, kind) {
         Ok(()) => R_OK,
         Err(_) => R_INVALID,
     }
@@ -516,6 +587,8 @@ pub fn svc_name(number: u32) -> &'static str {
         0x35 => "GetProcessId",
         0x37 => "GetThreadId",
         0x38 => "GetResourceLimit",
+        0x39 => "GetResourceLimitLimitValues",
+        0x3A => "GetResourceLimitCurrentValues",
         0x3C => "Break",
         0x3D => "OutputDebugString",
         0x4F => "ReplyAndReceive",

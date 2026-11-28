@@ -134,7 +134,10 @@ pub fn step(ctx: &mut Context, mem: &Memory, address: u32, log: &mut dyn MissLog
                 return Step::Unsupported;
             }
             let bl = second >> 12 & 1 != 0;
-            let offset = (((hw & 0x3FF) as i32) << 21 | ((second & 0x7FF) as i32) << 10) >> 10;
+            // the v5T form: S:imm10 (first) and imm11 (second); the offset is imm10<<12 |
+            // imm11<<1, sign-extended from bit 22
+            let raw = ((hw as u32 & 0x7FF) << 12) | ((second as u32 & 0x7FF) << 1);
+            let offset = ((raw << 9) as i32) >> 9;
             ctx.r[14] = address + 4 | if bl { 1 } else { 0 };
             let target = (address as i32 + 4 + offset) as u32;
             if bl {
@@ -322,19 +325,21 @@ fn flags_nz_cv(ctx: &mut Context, value: u32, carry: bool, overflow: bool) {
     ctx.v = overflow as u8;
 }
 
-/// format 5: add/cmp/mov/bx on the high registers
+/// format 5: add/cmp/mov on the high registers, then bx/blx through a register
+/// the fields: the destination (or cmp's first operand) is bit7:bits[2:0], the source is
+/// bit6:bits[5:3]; bx/blx name the target in bits[6:3] with bit7 as the link
 fn hi_register(ctx: &mut Context, address: u32, hw: u16, _log: &mut dyn MissLog) -> Step {
     let op = hw >> 8 & 0x3;
-    let first = ((hw >> 3 & 0x7) as usize) | ((hw >> 7 & 1) as usize) << 3;
-    let second = ((hw & 0x7) as usize) | ((hw >> 6 & 1) as usize) << 3;
+    let first = (((hw >> 7 & 1) as usize) << 3) | ((hw & 0x7) as usize);
+    let second = (((hw >> 6 & 1) as usize) << 3) | ((hw >> 3 & 0x7) as usize);
     match op {
         0 => {
             let (value, carry, overflow) = add_flags(reg_read(ctx, first, address, true), reg_read(ctx, second, address, true), false);
-            if second == 15 {
-                ctx.r[15] = value & !3;
+            if first == 15 {
+                ctx.r[15] = value & !1;
                 return Step::Taken;
             }
-            ctx.r[second] = value;
+            ctx.r[first] = value;
             ctx.n = (value >> 31 != 0) as u8;
             ctx.z = (value == 0) as u8;
             ctx.c = carry as u8;
@@ -352,59 +357,63 @@ fn hi_register(ctx: &mut Context, address: u32, hw: u16, _log: &mut dyn MissLog)
             Step::Next
         }
         2 => {
-            let value = reg_read(ctx, first, address, true);
-            if second == 15 {
+            let value = reg_read(ctx, second, address, true);
+            if first == 15 {
                 // mov pc from the hi form: state per the low bit
                 jump_arm(ctx, value);
                 return Step::Taken;
             }
-            ctx.r[second] = value;
+            ctx.r[first] = value;
             ctx.r[15] = address + 2;
             Step::Next
         }
         _ => {
-            // BX
-            let target = reg_read(ctx, first, address, true);
-            jump_arm(ctx, target);
+            // bx lr, blx r3: the register in bits[6:3], bit7 links (blx: return in Thumb, go ARM)
+            let target = reg_read(ctx, (((hw >> 6 & 1) as usize) << 3) | ((hw >> 3 & 0x7) as usize), address, true);
+            if hw >> 7 & 1 == 1 {
+                ctx.r[14] = address + 4 | 1;
+                ctx.thumb = 0;
+                ctx.r[15] = target & !3;
+            } else {
+                jump_arm(ctx, target);
+            }
             Step::Taken
         }
     }
 }
 
-/// formats 7/8: load/store with a register offset
+/// formats 7/8: load/store with a register offset. bits[11:9] name the form:
+/// 0 STR, 1 STRH, 2 STRB, 3 LDRSB, 4 LDR, 5 LDRH, 6 LDRB, 7 LDRSH
 fn reg_offset(ctx: &mut Context, mem: &Memory, address: u32, hw: u16, log: &mut dyn MissLog) -> Step {
-    let load = hw >> 11 & 1 != 0;
+    let op = hw >> 9 & 0x7;
+    let load = op & 0b100 != 0 || op == 0b011;
+    let signed = matches!(op, 0b011 | 0b111);
+    let half = op & 1 == 1;
+    let byte = matches!(op, 0b010 | 0b011 | 0b110);
     let rm = (hw >> 6 & 0x7) as usize;
-    let rd = (hw >> 3 & 0x7) as usize;
-    let rb = (hw & 0x7) as usize;
-    let at = ctx.r[rb].wrapping_add(ctx.r[rm]);
-    let signed = hw >> 9 & 1 != 0;
-    if signed {
-        // format 8: STRH (L0 H0), LDRH (L1 H0), LDRSB (L0 H1), LDRSH (L1 H1)
-        let signed_value = hw >> 10 & 1 != 0;
-        if load {
-            ctx.r[rd] = if !signed_value {
-                mem.read16(at) as u32
-            } else {
-                mem.read16(at) as i16 as i32 as u32
-            };
-        } else if signed_value {
-            log.miss(address, hw as u32, "the undefined signed halfword store thumb form");
-            return Step::Unsupported;
-        } else {
-            mem.write16(at, ctx.r[rd] as u16);
-        }
-    } else {
-        // format 7: STR/LDR word (B=0) and byte (B=1)
-        let byte = hw >> 10 & 1 != 0;
-        if load {
-            ctx.r[rd] = if byte { mem.read8(at) as u32 } else { mem.read32(at) };
+    let rn = (hw >> 3 & 0x7) as usize;
+    let rd = (hw & 0x7) as usize;
+    let at = ctx.r[rn].wrapping_add(ctx.r[rm]);
+    if load {
+        ctx.r[rd] = if signed && byte {
+            mem.read8(at) as i8 as i32 as u32
+        } else if signed {
+            mem.read16(at) as i16 as i32 as u32
+        } else if half {
+            mem.read16(at) as u32
         } else if byte {
-            mem.write8(at, ctx.r[rd] as u8);
+            mem.read8(at) as u32
         } else {
-            mem.write32(at, ctx.r[rd]);
-        }
+            mem.read32(at)
+        };
+    } else if half {
+        mem.write16(at, ctx.r[rd] as u16);
+    } else if byte {
+        mem.write8(at, ctx.r[rd] as u8);
+    } else {
+        mem.write32(at, ctx.r[rd]);
     }
+    let _ = log;
     ctx.r[15] = address + 2;
     Step::Next
 }

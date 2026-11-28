@@ -162,4 +162,62 @@ Not opened this wave (later waves'/owner's D2 pending): `P:\Games\Nintendo\DUMPS
 
 ## Outcome
 
-*(to be filled when the wave lands)*
+**Built.** `src/runtime3ds` is in place as the plan's table names it: `context.rs` (the recomp.h v8
+mirror, held to the real header by a compiled layout probe), `dispatch.rs` (DLL load, entry search,
+CRO places, origins/stale, natives), `run.rs` (budget slices, the four exits, the settle, the
+interpreter fallback), `mem.rs` (region table, 4 GiB reservation, 64 KiB lazy commits, page tables,
+watched VRAM, MMIO, `load_bytes` for the loader), `thread.rs` (one host thread per guest thread,
+the `Scheduler` shape), `svc.rs` (registry + gap fallback + the W2 kernel table), `hostfast.rs`
+(the self-answered tick and the lent mutex), `interp/{mod,arm,thumb,vfp}.rs`, `prof.rs` (miss and
+interpreted-block hints + the hot set), `src/bin/boot3ds.rs` (dump → C → clang → DLL → map → boot;
+`--dll` reuses a build), and `tests/{interp_golden,host_run,differential}.rs` +
+`tests/common/mod.rs`. The root `Cargo.toml` already carried the one member line.
+
+Additions the boot needed beyond the first plan: the kernel config page's FCRAM-size word
+(`0x1FF80040`, 64 MiB for APPMEMTYPE 0) is poked by the loader; `svcControlMemory` COMMIT succeeds
+inside an existing mapping; LINEAR COMMIT with addr0 = 0 bumps in the `0x14000000..0x1C000000`
+window and returns the chosen address; resource-limit svcs `0x38/0x39/0x3A` answer a handle and
+plausible limits; the boot's svc ledger and interpreted-block starts are in the report/log. The
+boot now waits for every host thread to leave its slice before it reports (the first try dropped
+`Process3ds` under a running thread and crashed in `Library::entries`).
+
+**Tests.** `cargo test -p runtime3ds`: 22 unit + 13 interpreter golden + 2 host-run + 1
+differential = 38 passed (the differential skips without `NXRS_3DS_CC_TESTS`). The differential
+runs ARM data-processing/multiply/load-store/shift plus VFP vldr/vadd/vmul/vcmp/vcvt through the
+interpreter and through the recompiled C and compares r0–r12, nzcv, s0–s4, fpscr flags and a heap
+word: **0 mismatches**, recompiled > 0. The interpreter golden cases are the classes the donor
+leaves to `interpret` plus common ones (shifts/carry, multiplies, extra load/store, media,
+exclusive monitor, Thumb-1 including pc-relative/BL, VFP arithmetic/compare/conversion/flush);
+several first-pass test encodings were wrong and were replaced with clang-assembler-verified ones.
+With `NXRS_3DS_CC_TESTS=1` the host-run proofs build DLLs and execute them through the mirror: the
+entry answers ticks in place after learning the site, hands an unknown svc over with a gap line,
+calls and returns; a patched function goes stale, its entry refuses and the interpreter runs it.
+
+**Verified.** Headless Sonic (program `0004000000062300`, decrypted .3ds): 130 779 entry points,
+DLL FNV1a `782A2BA22EF1144F` (92 938 240 bytes); the main thread enters at `0x00100000` with the
+stack at `0x10000000`/0x4000 and runs 799 987 recompiled instructions, then 9 980 237 interpreted
+(92.6% of the 10.3M-tick window) in a 20 s budget. The svc ledger: `GetResourceLimit`,
+`GetResourceLimitCurrentValues`, `CreateAddressArbiter`, two `ControlMemory` (one LINEAR 0x3C80000
+at 0x14000000), `CloseHandle`, all answered (no gaps); stop `Time`, clean, every thread joined.
+Artifacts under `build/DS/W2/sonic/`: `boot.log`, `run-console.txt`, `discovered.tsv`, `hotset.txt`,
+the DLL and its `.lib`/`.exp`. `cargo test --workspace --exclude renhdrum` is green; the diff is
+`src/runtime3ds/`, the wave doc, and the already-committed member line.
+
+**Unproven / blocker.** The exit criterion's *first threads* are not reached. After the linear
+allocation the title returns into `0x00336854`, which is a branch target inside the function whose
+entries are `0x00336850`/`0x0033683C`; `lookup` (entry-table binary search, the ABI's shape) has no
+entry for it, so the interpreter starts **inside** the function at the memclr loop
+(`stmhs/subshs/bhs`) without the prologue, and the loop then runs on a size/return state it did not
+set up. `CreateThread` is never called, so the boot stops at the wall-clock cap instead. This is the
+ABI assumption the brief said to report rather than force: the entry table covers function starts,
+but real code resumes at internal labels after indirect calls/returns; the generated C's own
+dispatch switch names those labels, so a host-side "containing function" lookup would be the
+smallest fix, but the first attempt at it livelocked in the block-budget resume and was reverted to
+the documented interpreter fallback. Next step (W3): either teach the host's lookup to resume a
+containing function at an internal label with a fresh budget, or have W0/W1 discovery/exports seed
+those targets as funcs; named services then carry the title to its thread creation.
+
+**Slips.** One: the first boot attempt dropped `Process3ds` under a running host thread (fixed by
+the join in `start`); the containing-function lookup experiment was reverted, not shipped. No files
+outside the unit were changed.
+

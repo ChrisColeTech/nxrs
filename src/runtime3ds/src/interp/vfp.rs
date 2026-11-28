@@ -8,7 +8,7 @@ use crate::context::Context;
 /// one VFP instruction: the cdp space (the math), the mrc/mcr space (moves, fpscr), and the
 /// ldc/stc space (vldr/vstr/vldm/vstm and the core-pair moves)
 pub fn step(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log: &mut dyn MissLog) -> Step {
-    match opcode >> 25 {
+    match opcode >> 25 & 0x7 {
         // vldr/vstr/vldm/vstm and the two-core-register moves
         6 => load_store(ctx, mem, address, opcode, log),
         // cdp: the arithmetic; mcr/mrc: the register moves

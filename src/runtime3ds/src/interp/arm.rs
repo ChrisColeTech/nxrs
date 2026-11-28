@@ -9,6 +9,9 @@ use super::*;
 pub fn step(ctx: &mut Context, mem: &Memory, address: u32, log: &mut dyn MissLog, svc: SvcSink) -> Step {
     let opcode = mem.read32(address);
     let cond = opcode >> 28;
+    if std::env::var_os("GOLDEN_TRACE").is_some() {
+        eprintln!("arm::step at {address:#x} opcode {opcode:#010x} group {}", opcode >> 25 & 7);
+    }
     if cond == 0xF {
         return unconditional(ctx, address, opcode, log);
     }
@@ -16,7 +19,7 @@ pub fn step(ctx: &mut Context, mem: &Memory, address: u32, log: &mut dyn MissLog
         ctx.r[15] = address + 4;
         return Step::Next;
     }
-    match opcode >> 25 {
+    match opcode >> 25 & 7 {
         0 | 1 => special_or_data(ctx, mem, address, opcode, log, svc),
         2 => transfer_word_byte(ctx, mem, address, opcode, log),
         3 => media_or_extend(ctx, mem, address, opcode, log),
@@ -33,7 +36,7 @@ pub fn step(ctx: &mut Context, mem: &Memory, address: u32, log: &mut dyn MissLog
         }
         6 => vfp::step(ctx, mem, address, opcode, log),
         7 => coprocessor_or_svc(ctx, mem, address, opcode, log, svc),
-        _ => unreachable!(),
+        _ => unreachable!("three bits name every group"),
     }
 }
 
@@ -75,6 +78,12 @@ fn special_or_data(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
     if opcode >> 4 & 0xF == 0x9 {
         return exchange_group(ctx, mem, address, opcode, log);
     }
+    // the extra load/store forms (halfword, signed byte/halfword, LDRD/STRD) live in this
+    // group too: bits[7:4] = 1xx1 below the exchange pattern
+    let bits74 = opcode >> 4 & 0xF;
+    if bits74 & 0b1001 == 0b1001 && bits74 & 0b0110 != 0 {
+        return media_or_extend(ctx, mem, address, opcode, log);
+    }
     // MRS rd, cpsr: cond 0001 0000 rd 0000 0000 1111 0000
     if opcode >> 20 & 0xFF == 0x10 && opcode >> 4 & 0xFFF == 0x0F0 {
         let rd = (opcode >> 12 & 0xF) as usize;
@@ -104,6 +113,14 @@ fn special_or_data(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
         log.miss(address, opcode, "bkpt");
         return Step::Unsupported;
     }
+    // CLZ: cond 0001 0110 1111 rd 1111 0001 rm
+    if opcode >> 20 & 0xFF == 0x16 && opcode >> 16 & 0xF == 0xF && opcode >> 8 & 0xF == 0xF && opcode >> 4 & 0xF == 0x1 {
+        let rd = (opcode >> 12 & 0xF) as usize;
+        let rm = (opcode & 0xF) as usize;
+        reg_write(ctx, rd, ctx.r[rm].leading_zeros());
+        ctx.r[15] = address + 4;
+        return Step::Next;
+    }
     // MSR cpsr, register: cond 0001 0R10 mask 1111 0000 0000 rm
     if matches!(opcode >> 20 & 0xFF, 0x12 | 0x16) && opcode >> 12 & 0xF == 0xF && opcode >> 4 & 0xFFF == 0 {
         let value = reg_read(ctx, (opcode & 0xF) as usize, address, false);
@@ -122,16 +139,20 @@ fn exchange_group(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, lo
     let rm = (opcode & 0xF) as usize;
     let set_flags = opcode >> 20 & 1 != 0;
     if opcode >> 24 & 1 == 0 {
-        match opcode >> 20 & 0xF {
-            // MUL/MLA
+        // the destination register sits at bits[19:16] in every multiply
+        let destination = (opcode >> 16 & 0xF) as usize;
+        // bits[23:21] name the form: 000 MUL, 001 MLA, 010 UMAAL, 100 UMULL, 101 UMLAL,
+        // 110 SMULL, 111 SMLAL
+        match opcode >> 21 & 0x7 {
+            // MUL/MLA: Rd = Rm*Rs (+ Rn)
             kind @ (0x0 | 0x1) => {
                 let product = ctx.r[rm].wrapping_mul(ctx.r[rs]);
-                let value = if kind == 0x1 { product.wrapping_add(ctx.r[rn]) } else { product };
-                if rd == 15 {
+                let value = if kind == 0x1 { product.wrapping_add(ctx.r[(opcode >> 12 & 0xF) as usize]) } else { product };
+                if destination == 15 {
                     log.miss(address, opcode, "a multiply into pc");
                     return Step::Unsupported;
                 }
-                ctx.r[rd] = value;
+                ctx.r[destination] = value;
                 if set_flags {
                     ctx.n = (value >> 31 != 0) as u8;
                     ctx.z = (value == 0) as u8;
@@ -141,23 +162,26 @@ fn exchange_group(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, lo
             }
             // UMAAL: RdHi:RdLo = Rn*Rm + RdHi + RdLo
             0x2 => {
-                let sum = (ctx.r[rm] as u64) * (ctx.r[rs] as u64) + ctx.r[rn] as u64 + ctx.r[rd] as u64;
-                ctx.r[rn] = (sum & 0xFFFF_FFFF) as u32;
-                ctx.r[rd] = (sum >> 32) as u32;
+                let sum = (ctx.r[rm] as u64) * (ctx.r[rs] as u64)
+                    + ctx.r[(opcode >> 12 & 0xF) as usize] as u64
+                    + ctx.r[destination] as u64;
+                ctx.r[(opcode >> 12 & 0xF) as usize] = (sum & 0xFFFF_FFFF) as u32;
+                ctx.r[destination] = (sum >> 32) as u32;
                 ctx.r[15] = address + 4;
                 Step::Next
             }
-            // UMULL/UMLAL/SMULL/SMLAL (+S)
-            kind @ 0x8..=0xF => {
-                let mut product = match kind & 0xC {
-                    0x8 => (ctx.r[rm] as u64) * (ctx.r[rs] as u64),
-                    _ => ((ctx.r[rm] as i32 as i64) * (ctx.r[rs] as i32 as i64)) as u64,
+            // UMULL/UMLAL/SMULL/SMLAL (+S): RdHi:RdLo = Rn*Rm (+ RdHi:RdLo)
+            kind @ 0x4..=0x7 => {
+                let mut product = if kind & 0b010 == 0 {
+                    (ctx.r[rm] as u64) * (ctx.r[rs] as u64)
+                } else {
+                    ((ctx.r[rm] as i32 as i64) * (ctx.r[rs] as i32 as i64)) as u64
                 };
-                if kind & 0x2 != 0 {
-                    product = product.wrapping_add(ctx.r[rn] as u64 | (ctx.r[rd] as u64) << 32);
+                if kind & 0x1 != 0 {
+                    product = product.wrapping_add(ctx.r[(opcode >> 12 & 0xF) as usize] as u64 | (ctx.r[destination] as u64) << 32);
                 }
-                ctx.r[rn] = (product & 0xFFFF_FFFF) as u32;
-                ctx.r[rd] = (product >> 32) as u32;
+                ctx.r[(opcode >> 12 & 0xF) as usize] = (product & 0xFFFF_FFFF) as u32;
+                ctx.r[destination] = (product >> 32) as u32;
                 if set_flags {
                     ctx.n = (product >> 63 != 0) as u8;
                     ctx.z = (product == 0) as u8;
@@ -454,7 +478,8 @@ fn apply_msr(ctx: &mut Context, mask: u32, value: u32, log: &mut dyn MissLog, ad
     }
 }
 
-/// LDR/STR word and byte, all of P/U/B/W/L, pc-relative literal loads included
+/// LDR/STR word and byte, immediate offset (the group-2 form: bits[27:25] = 010), pc-relative
+/// literal loads included
 fn transfer_word_byte(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log: &mut dyn MissLog) -> Step {
     let pre_index = opcode >> 24 & 1 != 0;
     let up = opcode >> 23 & 1 != 0;
@@ -463,24 +488,11 @@ fn transfer_word_byte(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32
     let load = opcode >> 20 & 1 != 0;
     let rn = (opcode >> 16 & 0xF) as usize;
     let rd = (opcode >> 12 & 0xF) as usize;
-    let offset = if opcode >> 25 & 1 != 0 {
-        opcode & 0xFFF
-    } else {
-        let rm = (opcode & 0xF) as usize;
-        let value = reg_read(ctx, rm, address, false);
-        let amount = opcode >> 7 & 0x1F;
-        let shift = match opcode >> 5 & 3 {
-            0 => Shift { kind: ShiftKind::Lsl, amount, by_register: false },
-            1 => Shift { kind: ShiftKind::Lsr, amount: amount.max(1), by_register: false },
-            2 => Shift { kind: ShiftKind::Asr, amount: amount.max(1), by_register: false },
-            _ if amount == 0 => Shift { kind: ShiftKind::Rrx, amount: 0, by_register: false },
-            _ => Shift { kind: ShiftKind::Ror, amount, by_register: false },
-        };
-        shift_value(value, &shift, ctx.c != 0, shift_amount(&shift, value)).0
-    };
+    let offset = opcode & 0xFFF;
     let delta = if up { offset as i32 } else { -(offset as i32) };
     let base = reg_read(ctx, rn, address, false);
-    let target = (base as i32).wrapping_add(delta) as u32;
+    let offset_address = (base as i32).wrapping_add(delta) as u32;
+    let target = if pre_index { offset_address } else { base };
 
     if load {
         if rd == 15 {
@@ -494,23 +506,73 @@ fn transfer_word_byte(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32
         mem.write32(target, ctx.r[rd]);
     }
     if writeback || !pre_index {
-        ctx.r[rn] = target;
+        ctx.r[rn] = offset_address;
     }
     ctx.r[15] = address + 4;
     Step::Next
 }
 
-/// the halfword transfers, the pair transfers, and the extend/reverse group
+/// LDR/STR word and byte with a register offset (group 3, bits[7:4] == 0000), the shifted
+/// register form included
+fn register_transfer_word_byte(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log: &mut dyn MissLog) -> Step {
+    let pre_index = opcode >> 24 & 1 != 0;
+    let up = opcode >> 23 & 1 != 0;
+    let byte = opcode >> 22 & 1 != 0;
+    let writeback = opcode >> 21 & 1 != 0;
+    let load = opcode >> 20 & 1 != 0;
+    let rn = (opcode >> 16 & 0xF) as usize;
+    let rd = (opcode >> 12 & 0xF) as usize;
+    let rm = (opcode & 0xF) as usize;
+    let value = reg_read(ctx, rm, address, false);
+    let amount = opcode >> 7 & 0x1F;
+    let shift = match opcode >> 5 & 3 {
+        0 => Shift { kind: ShiftKind::Lsl, amount, by_register: false },
+        1 => Shift { kind: ShiftKind::Lsr, amount: amount.max(1), by_register: false },
+        2 => Shift { kind: ShiftKind::Asr, amount: amount.max(1), by_register: false },
+        _ if amount == 0 => Shift { kind: ShiftKind::Rrx, amount: 0, by_register: false },
+        _ => Shift { kind: ShiftKind::Ror, amount, by_register: false },
+    };
+    let offset = shift_value(value, &shift, ctx.c != 0, shift_amount(&shift, value)).0;
+    let delta = if up { offset as i32 } else { -(offset as i32) };
+    let base = reg_read(ctx, rn, address, false);
+    let offset_address = (base as i32).wrapping_add(delta) as u32;
+    let target = if pre_index { offset_address } else { base };
+
+    if load {
+        if rd == 15 {
+            log.miss(address, opcode, "a load into pc");
+            return Step::Unsupported;
+        }
+        ctx.r[rd] = if byte { mem.read8(target) as u32 } else { mem.read32(target) };
+    } else if byte {
+        mem.write8(target, ctx.r[rd] as u8);
+    } else {
+        mem.write32(target, ctx.r[rd]);
+    }
+    if writeback || !pre_index {
+        ctx.r[rn] = offset_address;
+    }
+    ctx.r[15] = address + 4;
+    Step::Next
+}
+
+/// the halfword transfers, the pair transfers, the extends, and the register-offset word/byte
+/// single transfer (group 3 holds all of them: bits[7:4] names the form)
 fn media_or_extend(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log: &mut dyn MissLog) -> Step {
-    // LDRD/STRD: bit22 clear, 1111 in bits[11:8], bits[7:4] 1101 (load) or 1111 (store)
-    if opcode >> 22 & 1 == 0 && opcode >> 8 & 0xF == 0xF && matches!(opcode >> 4 & 0xF, 0xD | 0xF) {
+    let bits74 = opcode >> 4 & 0xF;
+    // LDRD/STRD: the group-0 space, bit20 clear, bits[7:4] 1101 (load) or 1111 (store)
+    if opcode >> 25 & 0x7 != 3 && opcode >> 20 & 1 == 0 && matches!(bits74, 0xD | 0xF) {
         return pair_transfer(ctx, mem, address, opcode, log);
     }
-    let bits74 = opcode >> 4 & 0xF;
-    // halfword / signed byte transfers: bits[7:4] = 1SH1 with SH naming the form
-    if bits74 & 0b1001 == 0b1001 && bits74 & 0b0110 != 0 {
-        let signed_byte = bits74 >> 5 & 3 == 0b10;
-        let signed_half = bits74 >> 5 & 3 == 0b11;
+    // the plain register-offset word/byte transfer: bits[7:4] == 0000
+    if bits74 == 0 {
+        return register_transfer_word_byte(ctx, mem, address, opcode, log);
+    }
+    // halfword / signed byte transfers: the group-0/1 space, bits[7:4] = 1SH1 with SH naming the
+    // form (group 3 reuses those bit patterns for media instructions below)
+    if opcode >> 25 & 0x7 != 3 && bits74 & 0b1001 == 0b1001 && bits74 & 0b0110 != 0 {
+        let signed_byte = (bits74 >> 1) & 3 == 0b10;
+        let signed_half = (bits74 >> 1) & 3 == 0b11;
         let pre_index = opcode >> 24 & 1 != 0;
         let up = opcode >> 23 & 1 != 0;
         let writeback = opcode >> 21 & 1 != 0;
@@ -518,13 +580,14 @@ fn media_or_extend(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
         let rn = (opcode >> 16 & 0xF) as usize;
         let rd = (opcode >> 12 & 0xF) as usize;
         let offset = if opcode >> 22 & 1 != 0 {
-            opcode >> 4 & 0xF0 | opcode & 0xF
+            (opcode >> 8 & 0xF) << 4 | opcode & 0xF
         } else {
             reg_read(ctx, (opcode & 0xF) as usize, address, false)
         };
         let delta = if up { offset as i32 } else { -(offset as i32) };
         let base = reg_read(ctx, rn, address, false);
-        let target = (base as i32).wrapping_add(delta) as u32;
+        let offset_address = (base as i32).wrapping_add(delta) as u32;
+        let target = if pre_index { offset_address } else { base };
         if load {
             ctx.r[rd] = if signed_byte {
                 mem.read8(target) as i8 as i32 as u32
@@ -537,7 +600,7 @@ fn media_or_extend(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
             mem.write16(target, ctx.r[rd] as u16);
         }
         if writeback || !pre_index {
-            ctx.r[rn] = target;
+            ctx.r[rn] = offset_address;
         }
         ctx.r[15] = address + 4;
         return Step::Next;
@@ -545,11 +608,11 @@ fn media_or_extend(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
 
     let rd = (opcode >> 12 & 0xF) as usize;
     // the extends: 0x6A/0x6B/0x6E, 1111 in bits[15:12], bits[7:4] == 0111, rotate in bits[11:8]
-    if matches!(opcode >> 20 & 0xFF, 0x6A | 0x6B | 0x6E) && opcode >> 12 & 0xF == 0xF && bits74 == 0x7 {
+    if matches!(opcode >> 20 & 0xFF, 0x6A | 0x6B | 0x6E) && opcode >> 16 & 0xF == 0xF && bits74 == 0x7 {
         let rm = (opcode & 0xF) as usize;
         let value = ctx.r[rm].rotate_right((opcode >> 10 & 0x3) * 8);
         ctx.r[rd] = match opcode >> 20 & 0xF {
-            0xA => value as u8 as u32,
+            0xA => value as u8 as i8 as i32 as u32,
             0xB => value as u16 as i16 as i32 as u32,
             _ => value & 0xFF,
         };
@@ -557,20 +620,24 @@ fn media_or_extend(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, l
         return Step::Next;
     }
     // UXTH: 0x6F, 1111 in bits[15:12], rotate not 1111 (that pattern is REVSH)
-    if opcode >> 20 & 0xFF == 0x6F && opcode >> 12 & 0xF == 0xF && bits74 == 0x7 && opcode >> 8 & 0xF != 0xF {
+    if opcode >> 20 & 0xFF == 0x6F && opcode >> 16 & 0xF == 0xF && bits74 == 0x7 && opcode >> 8 & 0xF != 0xF {
         let rm = (opcode & 0xF) as usize;
         ctx.r[rd] = ctx.r[rm].rotate_right((opcode >> 10 & 0x3) * 8) & 0xFFFF;
         ctx.r[15] = address + 4;
         return Step::Next;
     }
-    // REV / REV16 / REVSH: 0x6F, 1111 in bits[15:12], 1111 in bits[11:8]
-    if opcode >> 20 & 0xFF == 0x6F && opcode >> 12 & 0xF == 0xF && opcode >> 8 & 0xF == 0xF {
+    // REV / REV16 / REVSH: bits[11:8] == 1111, bits[7:4] names the form; REVSH is the 0x6F
+    // family, REV/REV16 the 0x6B family
+    if matches!(opcode >> 20 & 0xFF, 0x6B | 0x6F) && opcode >> 16 & 0xF == 0xF && opcode >> 8 & 0xF == 0xF {
         let rm = (opcode & 0xF) as usize;
         let value = ctx.r[rm];
-        ctx.r[rd] = match bits74 {
-            0x3 => value.swap_bytes(),
-            0xB => ((value & 0x00FF_00FF) << 8) | ((value >> 8) & 0x00FF_00FF),
-            _ => (value as u16).swap_bytes() as u16 as i16 as i32 as u32,
+        let revsh = opcode >> 20 & 0xF == 0xF;
+        ctx.r[rd] = if revsh {
+            (value as u16).swap_bytes() as i16 as i32 as u32
+        } else if bits74 == 0x3 {
+            value.swap_bytes()
+        } else {
+            ((value & 0x00FF_00FF) << 8) | ((value >> 8) & 0x00FF_00FF)
         };
         ctx.r[15] = address + 4;
         return Step::Next;
@@ -584,13 +651,14 @@ fn pair_transfer(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log
     let pre_index = opcode >> 24 & 1 != 0;
     let up = opcode >> 23 & 1 != 0;
     let writeback = opcode >> 21 & 1 != 0;
-    let load = opcode >> 20 & 1 != 0;
+    let load = opcode >> 4 & 0xF == 0xD;
     let rn = (opcode >> 16 & 0xF) as usize;
     let rd = (opcode >> 12 & 0xF) as usize;
     let offset = opcode & 0xF | ((opcode >> 8 & 0xF) << 4);
     let delta = if up { offset as i32 } else { -(offset as i32) };
     let base = reg_read(ctx, rn, address, false);
-    let target = (base as i32).wrapping_add(delta) as u32;
+    let offset_address = (base as i32).wrapping_add(delta) as u32;
+    let target = if pre_index { offset_address } else { base };
     if load {
         if rd & 1 != 0 || rd >= 14 {
             log.miss(address, opcode, "a pair load into a register this host refuses");
@@ -607,7 +675,7 @@ fn pair_transfer(ctx: &mut Context, mem: &Memory, address: u32, opcode: u32, log
         mem.write32(target.wrapping_add(4), ctx.r[rd + 1]);
     }
     if writeback || !pre_index {
-        ctx.r[rn] = target;
+        ctx.r[rn] = offset_address;
     }
     ctx.r[15] = address + 4;
     Step::Next
