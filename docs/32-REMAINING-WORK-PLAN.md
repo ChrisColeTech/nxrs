@@ -246,6 +246,15 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       so the lead left it out (docs/31 §4). Memory: textures made and destroyed, not leaked; peak 28.2-29.2 GB.
       Next cut: the replay thread's own ~18-19.5 ms (translation ~5.4, pool sync ~7.4: page hashing ~2.9, write
       watch 1.2, landing waits ~2); a fixed-camera window to make runs comparable (noise ~+-1 ms).
+- [~] **OOT-REPLAY2** (2026-11-28; merged: `oot-still` scenario (oot's steps, window 660-820 s on the standing
+      stretch, ~2,050 draws every run) + its route references + `docs/waves/OOT-REPLAY2.md`; code D NOT merged,
+      branch `ootreplay` `598dfcc`). D (`NXGFX_SYNC_HASH_UNLOCKED`: pool sync drops the pool lock while hashing):
+      `oot-still` 48.1 / 44.0 (`20261128-044556-r2-base`) -> 49.6 / 47.0 (`-070833-r2-after`), frame 20.80 ->
+      20.14 ms, inside the base's own 20.63-21.27 spread; the lanes' resolve lock waits rose 0.4-0.7 -> 1.1-1.4 ms
+      (the OOT-LOCK pattern); Fault A 33 in `-072415-r2-house` against 10-21 before, with the lock released mid-sync.
+      Lead left it out. Fast-core placement, pre-pass ahead, one-pass upload skip: moved nothing, removed; 12 lanes
+      20.80 -> 20.64 ms for 13 ms more CPU. Replay busy ~20 ms in the fixed window against 15.8: pool sync 8.0,
+      translation 6.0, lane joins 2.3, pre-pass 1.7 (~4.7 ms of it waiting on other threads).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.

@@ -151,6 +151,34 @@ h7 = "Link in his house"
 walk1 = "Link walking in his house"
 last = "Link in his house"
 
+[oot-still]
+title = "The Legend of Zelda Ocarina of Time"
+about = "as oot (the same steps, shots and checks); the window is the standing stretch h2-h7 (fixed view)"
+# OOT-REPLAY2: oot's walk differs from run to run (1,072-1,522 draws a frame in [845, 915] over OOT-LOCK's runs), so
+# its FPS moves with the walk. Over [660, 820] (h2-h7) Link stands in his house with A every 1.5 s: 2,007-2,093 draws
+# in each of those runs, frame time 20.7-21.6 ms. The walk window's numbers come from the same run.
+seconds = 935
+window = [660, 820]
+fps = 59
+steps = ["wait 25", "shot title", "press A ; 3 * 25", "shot story", "press A ; 3 * 25", "shot nightmare",
+         "press A ; 3 * 25", "shot house", "press A ; 3 * 25", "shot forest load", "press A ; 3 * 10",
+         "shot deku tree", "press A ; 3 * 10", "shot navi", "press A ; 3 * 10", "shot end",
+         "press A ; 3 * 10", "shot x1", "press A ; 3 * 10", "shot x2", "press A ; 3 * 10", "shot x3",
+         "press A ; 3 * 10", "shot x4", "press A ; 3 * 10", "shot x5",
+         "press A ; 1.5 * 20", "shot h1", "press A ; 1.5 * 20", "shot h2", "press A ; 1.5 * 20", "shot h3",
+         "press A ; 1.5 * 20", "shot h4", "press A ; 1.5 * 20", "shot h5", "press A ; 1.5 * 20", "shot h6",
+         "press A ; 1.5 * 20", "shot h7", "replay oot_house_walk.txt ; 3", "shot walk1", "wait 6", "shot walk2", "wait 6", "shot walk3",
+         "wait 9", "replay oot_house_walk.txt ; 3", "shot walk4", "wait 6", "shot walk5", "wait 6",
+         "shot walk6", "wait 9", "replay oot_house_walk.txt ; 3", "shot walk7", "wait 6", "shot walk8",
+         "wait 6", "shot walk9", "wait 9", "shot last"]
+[oot-still.checks]
+x5 = "Link in his house, 'Move / Change View'"
+h1 = "Link in his house"
+h4 = "Link in his house"
+h7 = "Link in his house"
+walk1 = "Link walking in his house"
+last = "Link in his house"
+
 [oot-house]
 title = "The Legend of Zelda Ocarina of Time"
 about = "as oot to Link under control in his house, then A every 1.5 s with a shot after each (UPLOAD-SYNC check)"
