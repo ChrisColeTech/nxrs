@@ -194,6 +194,14 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       ~7/s in the house). Open: MKW's default pacer trial still fails on frame spikes (replay thread 17-24 ms);
       OoT pool-lock waits behind the completion thread's landings; OoT white house frame (~3-5/min, pre-existing);
       MKW near-black roadside shrubs (pre-existing).
+- [~] **OOT-FIX + OOT-FPS** (2026-11-27, merged into gameplay-harness; `docs/waves/OOT-FIX.md`, `OOT-FPS.md`).
+      OOT-FIX: washed-out colours fixed (light-probe pools now backed and in the gmem table; pipeline-crashed.bin
+      lists only real crashes), ~3.6x more draws. OOT-FPS: write-backs compared on the GPU (`NXGFX_WB_DIFF`),
+      landings in page runs, raw write log read once from host-cached memory. `oot` 845-915 s: 27.3 / 5% low 22.6
+      (`20261127-185906-fps-base-prof`) -> 29.6 / 27.3 of 59 (`20261127-210135-fps-final2-prof`, on route, sheets
+      read by the lead); peak memory 29.5 GB. Open: replay thread ~19.5 ms against ~15.8 for one vsync (set
+      building ~5.2 ms, hashing CPU rewrites ~3.4 ms); Fault A white house frames (10 in `-211650-fps-final2-house`);
+      memory item (table-only pools) not done.
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
