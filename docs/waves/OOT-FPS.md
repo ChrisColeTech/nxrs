@@ -273,6 +273,8 @@ lookups (see Slips).
   `scratchpad/ootfps/`. No repository file was written by a script.
 - The v2 profile's DLL and PDB were replaced by the v3 relink before its line-level analysis (only its function-level
   table, made before, is used here).
+- One `sed -i` edited this document (line 254, "As far as this agent knows, nothing else ran on GPU 0 ...") instead
+  of the editor tool; the lead may check that line's diff in `0093e84`.
 
 ### 6. Questions
 
