@@ -4107,6 +4107,15 @@ impl Gpu {
                 g.dev().destroy_image(im.image, None);
                 if let Some(a) = im.alloc {
                     let _ = g.alloc.lock().unwrap().free(a);
+                    super::lost::note_freed(g.q.completed(), g.q.last_fence(), || {
+                        format!(
+                            "image {:#x} of texture ser{} ({}x{})",
+                            vk::Handle::as_raw(im.image),
+                            im.tex.serial,
+                            im.extent.width,
+                            im.extent.height
+                        )
+                    });
                 }
             }));
         }

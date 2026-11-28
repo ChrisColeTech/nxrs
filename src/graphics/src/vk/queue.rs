@@ -198,9 +198,9 @@ pub struct Queue {
     inflight_cv: Condvar,
     recycled: Mutex<Vec<Sub>>,
     deferred: Mutex<Vec<(u64, Box<dyn FnOnce(&Gpu) + Send>)>>,
-    /// a submission is being recorded (under `sub`): releases wait for its fence, which it does not have yet
-    recording: AtomicBool,
-    after_current: Mutex<Vec<Box<dyn FnOnce(&Gpu) + Send>>>,
+    /// releases asked for while submissions are recorded: each waits for the fence of the submission that may still use
+    /// it, which it does not have yet (`AfterUse`)
+    after_use: Mutex<AfterUse<Box<dyn FnOnce(&Gpu) + Send>>>,
     receipts: Mutex<HashMap<u64, u64>>,
     next_receipt: AtomicU64,
     thread_started: AtomicBool,
@@ -242,8 +242,7 @@ impl Queue {
             inflight_cv: Condvar::new(),
             recycled: Mutex::new(Vec::new()),
             deferred: Mutex::new(Vec::new()),
-            recording: AtomicBool::new(false),
-            after_current: Mutex::new(Vec::new()),
+            after_use: Mutex::new(AfterUse::new()),
             receipts: Mutex::new(HashMap::new()),
             next_receipt: AtomicU64::new(1),
             thread_started: AtomicBool::new(false),
@@ -281,15 +280,91 @@ impl Queue {
             after_queued(Box::new(move |g: &'static Gpu| g.q.defer_after_use(f)));
             return;
         }
-        if self.recording.load(Ordering::Acquire) {
-            let mut l = self.after_current.lock().unwrap();
-            // re-check under the list lock: submit_sub drains it under the same lock before clearing the flag
-            if self.recording.load(Ordering::Acquire) {
-                l.push(f);
-                return;
-            }
+        // under the list's lock: submit_sub takes its releases under the same lock
+        let rest = self.after_use.lock().unwrap().push(f);
+        if let Err(f) = rest {
+            self.defer(self.last_fence(), f);
         }
-        self.defer(self.last_fence(), f);
+    }
+}
+
+/// Releases asked for while submissions are being recorded (`Queue::defer_after_use`), each tagged with the newest
+/// submission begun when it was asked (its serial). A submission's submit takes only the releases asked before any
+/// later submission began, with its own fence; the rest wait for the later one's. OOT-LOAD: the chained path
+/// (`chain_parked`) begins the next submission before it submits the previous one, and a single "recording" flag let
+/// that submit take the next one's releases and then say nothing was being recorded, so every release asked while the
+/// next one recorded ran when the previous one completed: Ocarina of Time's load freed an image made again with
+/// storage use (its old backing) before the submission that still read it was submitted, and the GPU read the freed
+/// memory (device lost, `build/play/20261128-090743-diag2`).
+pub(crate) struct AfterUse<F> {
+    /// the newest submission begun (its serial)
+    begun: u64,
+    /// the newest submission whose submit took its releases (the largest serial it covered)
+    covered: u64,
+    list: Vec<(u64, F)>,
+}
+
+impl<F> AfterUse<F> {
+    pub(crate) const fn new() -> Self {
+        AfterUse { begun: 0, covered: 0, list: Vec::new() }
+    }
+    /// Submission `serial` is begun (`make_sub`).
+    pub(crate) fn begin(&mut self, serial: u64) {
+        self.begun = self.begun.max(serial);
+    }
+    /// A submission begun is not submitted yet.
+    pub(crate) fn recording(&self) -> bool {
+        self.begun > self.covered
+    }
+    /// `f` held for the submission being recorded; back when none is (it waits for what was submitted).
+    pub(crate) fn push(&mut self, f: F) -> Result<(), F> {
+        if !self.recording() {
+            return Err(f);
+        }
+        self.list.push((self.begun, f));
+        Ok(())
+    }
+    /// A submission covering the submissions begun up to serial `upto` (itself and its children) is submitted: the
+    /// releases asked before any later one began, in order.
+    pub(crate) fn submit(&mut self, upto: u64) -> Vec<F> {
+        self.covered = self.covered.max(upto);
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.list).into_iter().partition(|e| e.0 <= upto);
+        self.list = later;
+        now.into_iter().map(|e| e.1).collect()
+    }
+}
+
+#[cfg(test)]
+mod after_use_tests {
+    use super::AfterUse;
+
+    /// OOT-LOAD: the next submission begun before the previous one is submitted keeps its releases until its own
+    /// submit (with one flag the previous submit took them and later ones ran at once: the image freed early).
+    #[test]
+    fn a_release_asked_while_the_next_submission_records_waits_for_it() {
+        let mut a = AfterUse::new();
+        a.begin(10);
+        assert_eq!(a.push("old view"), Ok(()));
+        a.begin(11); // chain_parked: the next submission begins first
+        assert_eq!(a.push("old image of 11's upgrade"), Ok(()));
+        assert_eq!(a.submit(10), vec!["old view"], "10's submit takes only what was asked before 11 began");
+        assert!(a.recording(), "11 is still being recorded");
+        assert_eq!(a.push("freed while 11 records"), Ok(()), "held for 11, not run after 10");
+        assert_eq!(a.submit(11), vec!["old image of 11's upgrade", "freed while 11 records"]);
+        assert!(!a.recording());
+        assert_eq!(a.push("nothing recorded"), Err("nothing recorded"));
+    }
+
+    /// A submission's children (begun after it, submitted with it) are covered by its submit.
+    #[test]
+    fn children_are_covered_by_their_parent_submit() {
+        let mut a = AfterUse::new();
+        a.begin(20);
+        a.begin(21);
+        a.begin(22);
+        assert_eq!(a.push(1), Ok(()));
+        assert_eq!(a.submit(22), vec![1]);
+        assert!(!a.recording());
     }
 }
 
@@ -786,7 +861,7 @@ fn make_sub(
     s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
     s.pre_serial = s.serial;
     s.frame = super::present::frames();
-    g.q.recording.store(true, Ordering::Release);
+    g.q.after_use.lock().unwrap().begin(s.serial);
     let bi =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
@@ -1185,12 +1260,13 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     }
     super::newndve::trace::link(s.serial, value, true);
     {
-        let mut l = q.after_current.lock().unwrap();
+        // this submission and every child recorded into it (begun after it, submitted with it)
+        let upto = s.children.iter().chain(s.dropped.iter()).map(|c| c.serial).fold(s.serial, u64::max);
+        let mut l = q.after_use.lock().unwrap();
         let mut d = q.deferred.lock().unwrap();
-        for f in l.drain(..) {
+        for f in l.submit(upto) {
             d.push((value, f));
         }
-        q.recording.store(false, Ordering::Release);
     }
     wait_diag::phase("submit: present/enqueue completion");
     // every GPU-write note of this recording is made: its landing re-arms the pages stamped with this epoch

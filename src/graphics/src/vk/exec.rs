@@ -5281,6 +5281,21 @@ enum SetRef {
 /// is a valid whole set already (`patch_set` checked it; the fill it was made with stays on): only the descriptors
 /// given are written over it.
 #[allow(clippy::too_many_arguments)]
+/// A stage set's offset about to be handed to the GPU (`vkCmdSetDescriptorBufferOffsetsEXT`): the chunk bound now
+/// (index, size) must be the chunk the set was written in (`cur`) and hold the whole set (`off` + `size`).
+fn db_offset_check(bound: Option<(usize, u64)>, cur: usize, off: u64, size: u64) -> Result<(), String> {
+    let Some((b, n)) = bound else {
+        return Err(format!("no chunk is bound (the set is at +{off:#x} of chunk {cur})"));
+    };
+    if b != cur {
+        return Err(format!("chunk {b} is bound, the set was written in chunk {cur} at +{off:#x}"));
+    }
+    if off + size > n {
+        return Err(format!("the set at +{off:#x} ({size} bytes) ends past its chunk of {n:#x} bytes"));
+    }
+    Ok(())
+}
+
 fn write_db_set(
     g: &Gpu,
     sub: &mut Sub,
@@ -6118,6 +6133,16 @@ mod set_patch_tests {
 mod db_fill_tests {
     use super::*;
 
+    /// OOT-LOAD: a set's offset is only handed to the GPU against the chunk it was written in, and inside it.
+    #[test]
+    fn a_set_offset_is_checked_against_the_bound_chunk() {
+        let mb4 = 4u64 << 20;
+        assert!(db_offset_check(Some((2, mb4)), 2, mb4 - 1600, 1600).is_ok());
+        assert!(db_offset_check(Some((2, mb4)), 2, mb4 - 1599, 1600).is_err(), "one byte past the chunk");
+        assert!(db_offset_check(Some((1, mb4)), 2, 0, 1600).is_err(), "written in another chunk than bound");
+        assert!(db_offset_check(None, 0, 0, 1600).is_err(), "nothing bound");
+    }
+
     /// MKW-LOSS: unbound slots are written by default, so none keeps an earlier recording's descriptor.
     #[test]
     fn unbound_slots_are_written_by_default() {
@@ -6410,7 +6435,7 @@ pub(crate) fn db_canary_scan(g: &Gpu, sub: &Sub, value: u64) {
 thread_local! {
     /// The (descriptor-buffer chunk, offset) each graphics stage's set was last bound at on this thread (the loss ring's
     /// mesh draw records).
-    static LAST_SETS: std::cell::Cell<[(u64, u64); 5]> = const { std::cell::Cell::new([(u64::MAX, 0); 5]) };
+    static LAST_SETS: std::cell::Cell<[(u64, u64); 6]> = const { std::cell::Cell::new([(u64::MAX, 0); 6]) };
     /// The stage-set descriptor buffer this thread last bound (its device address).
     static BOUND_DB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };}
 
@@ -6478,9 +6503,7 @@ fn bind_sets(
     dispatch: [u32; 3],
     base_instance: u32,
 ) {
-    if bp == vk::PipelineBindPoint::GRAPHICS {
-        LAST_SETS.with(|l| l.set([(u64::MAX, 0); 5]));
-    }
+    LAST_SETS.with(|l| l.set([(u64::MAX, 0); 6]));
     if super::lost::bindings::enabled() {
         qs.sets
             .borrow_mut()
@@ -6619,12 +6642,22 @@ fn bind_sets(
                     drop(q);
                     k.draws.lock().unwrap().insert((sub.db[sub.db_cur].addr, off), desc);
                 }
-                if st < 5 {
+                if st < 6 {
                     LAST_SETS.with(|l| {
                         let mut v = l.get();
                         v[st] = (sub.db_cur as u64, off);
                         l.set(v);
                     });
+                }
+                // the set's offset is read from the chunk bound now: it must be the chunk the set was written in, and
+                // the set must lie inside it (OOT-LOAD)
+                let bound = sub.db_bound.map(|b| (b, sub.db.get(b).map_or(0, |c| c.size)));
+                if let Err(e) = db_offset_check(bound, sub.db_cur, off, g.layout.db_stage_size) {
+                    crate::log::red(&format!(
+                        "descriptor buffers: stage {st} set of shader {} in submission {}: {e}",
+                        m.key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        sub.serial
+                    ));
                 }
                 if super::lost::bindings::enabled() {
                     qs.sets
@@ -9017,7 +9050,7 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
 
 fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
     super::queue::wait_diag::phase("dispatch: end pass");
-    checkpoint(g, sub, qs, false, || {
+    let ck = checkpoint(g, sub, qs, false, || {
         format!(
             "a dispatch of {}x{}x{} groups{}",
             d.x,
@@ -9085,6 +9118,19 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         [d.x as u32, d.y as u32, d.z as u32],
         0,
     );
+    if ck != 0 && g.d.caps.descbuf {
+        // the loss ring's record of where this dispatch reads its descriptors (OOT-LOAD)
+        let (chunk, off) = LAST_SETS.with(|l| l.get())[5];
+        let chunk = sub.db.get(chunk as usize).map_or((0, 0), |c| (c.addr, c.size));
+        let pool = if cs.uses_pool {
+            let a = sub.pool_snapshot.map(|(_, _, a)| a).filter(|&a| a != 0);
+            (a.or_else(|| g.tables.db.as_ref().map(|d| d.addr)).unwrap_or(0), g.layout.db_pool_size)
+        } else {
+            (0, 0)
+        };
+        let b = super::lost::ring::DescBinding { chunk, set: (off, g.layout.db_stage_size), pool };
+        super::lost::ring::note_dispatch(ck, sub.serial, b);
+    }
     let c0 = INDIRECT_C0.with(|c| c.replace((false, None)).1);
     // indirect: the GPU-written group counts copied into this dispatch's own c0 before it reads them (nxnative
     // nvn_mtl.m `dispatch_`); the CPU-side counts are 0, and a shader dividing or looping by them got Inf / NaN

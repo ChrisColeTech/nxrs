@@ -110,6 +110,84 @@ pub fn note_draw(checkpoint: u64, serial: u64, chunk_addr: u64, sets: [(u64, u64
     put(&DRAWS, &DRAW_I, &f);
 }
 
+const DISP_N: usize = 1024;
+const DISP_W: usize = 10;
+static DISPS: [[AtomicU64; DISP_W]; DISP_N] = [const { [const { AtomicU64::new(0) }; DISP_W] }; DISP_N];
+static DISP_I: AtomicU64 = AtomicU64::new(0);
+
+/// Where a dispatch (or draw) read its descriptors from, as bound when it was recorded (OOT-LOAD).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DescBinding {
+    /// the stage-set chunk bound (device address, size)
+    pub chunk: (u64, u64),
+    /// the set's offset in that chunk and the set's size
+    pub set: (u64, u64),
+    /// the pool set's buffer bound (device address, size; 0 when the work does not read the pool set)
+    pub pool: (u64, u64),
+}
+
+/// A dispatch recorded: its checkpoint, submission and the descriptor buffers it reads (`DescBinding`).
+pub fn note_dispatch(checkpoint: u64, serial: u64, b: DescBinding) {
+    put(
+        &DISPS,
+        &DISP_I,
+        &[checkpoint, serial, now_us(), b.chunk.0, b.chunk.1, b.set.0, b.set.1, b.pool.0, b.pool.1],
+    );
+}
+
+/// Where `fault` lies against [a, a + n): inside, past the end or below the start (by how much).
+pub fn relation(fault: u64, a: u64, n: u64) -> String {
+    if a == 0 {
+        "none".to_string()
+    } else if fault < a {
+        format!("{:#x} below its start", a - fault)
+    } else if fault < a + n {
+        format!("INSIDE it at +{:#x}", fault - a)
+    } else {
+        format!("{:#x} past its end", fault - (a + n))
+    }
+}
+
+/// The report lines for the dispatches among `markers`: the buffers each read its descriptors from, and where the
+/// faulting page lies against them.
+fn dispatch_report(markers: &[u64], fault: u64, sets: &[[u64; SET_W]], out: &mut Vec<String>) {
+    let ds = read(&DISPS, &DISP_I);
+    let subs = read(&SUBS, &SUB_I);
+    for &mk in markers {
+        let Some(d) = ds.iter().rev().find(|d| d[1] == mk) else {
+            continue;
+        };
+        let (serial, chunk, chunk_n, off, set_n, pool, pool_n) = (d[2], d[4], d[5], d[6], d[7], d[8], d[9]);
+        let value = match subs.iter().rev().find(|s| s[1] == serial) {
+            Some(s) => format!("timeline {} submitted at {:.3} s", s[2], s[3] as f64 / 1e6),
+            None => "its submission is not kept".to_string(),
+        };
+        out.push(format!(
+            "dispatch #{mk}: recorded at {:.3} s in submission {serial} ({value}); stage-set chunk {chunk:#x} +{chunk_n:#x} (the fault {}), its set at +{off:#x} ({set_n} bytes: the fault {}), pool set buffer {pool:#x} +{pool_n:#x} (the fault {})",
+            d[3] as f64 / 1e6,
+            relation(fault, chunk, chunk_n),
+            relation(fault, chunk + off, set_n),
+            relation(fault, pool, pool_n),
+        ));
+        if off + set_n > chunk_n {
+            out.push("  its set ENDS PAST its chunk".to_string());
+        }
+        if let Some(s) = sets.iter().rev().find(|s| s[1] == serial && s[3] == off && s[SET_W - 1] == chunk) {
+            for b in 0..(s[5] as usize).min(MAXB) {
+                let (bk, addr, range) = (s[6 + 4 * b], s[7 + 4 * b], s[8 + 4 * b]);
+                out.push(format!(
+                    "  binding {} (type {}): {addr:#x} +{range:#x} (the fault {})",
+                    bk >> 32,
+                    bk as u32 as i32,
+                    relation(fault, addr, range)
+                ));
+            }
+        } else {
+            out.push("  its set's writing is not kept".to_string());
+        }
+    }
+}
+
 /// A buffer freed (`kind` 1: its memory goes now; 2: a pool's buffer handed to be freed after use; 3: a descriptor
 /// buffer's memory goes now).
 pub fn note_free(kind: u64, addr: u64, size: u64, handle: u64, last_submitted: u64) {
@@ -239,6 +317,7 @@ pub fn report(markers: &[u64], fault: u64) -> Vec<String> {
     let mut ms: Vec<u64> = markers.to_vec();
     ms.sort_unstable();
     ms.dedup();
+    dispatch_report(&ms, fault, &sets, &mut out);
     for &mk in &ms {
         let Some(d) = draws.iter().rev().find(|d| d[1] == mk) else {
             continue;
@@ -347,6 +426,13 @@ pub fn report(markers: &[u64], fault: u64) -> Vec<String> {
     for f in near.iter().take(10) {
         out.push(format!("    {} (ends {:#x} below)", free_line(f, None), fault - (f.addr + f.size)));
     }
+    // and just above it (a read running below the start of a buffer: a negative index)
+    let mut above: Vec<Free> = mem_over(fault + 1, 64 << 20).into_iter().filter(|f| f.addr > fault).collect();
+    above.sort_by_key(|f| f.addr);
+    out.push(format!("  starting within 64 MB above it: {}", above.len()));
+    for f in above.iter().take(10) {
+        out.push(format!("    {} (starts {:#x} above)", free_line(f, None), f.addr - fault));
+    }
     let mut handles: Vec<u64> = fs.iter().rev().take(4).map(|f| f.handle).collect();
     handles.dedup();
     for h in handles {
@@ -409,5 +495,19 @@ mod tests {
         assert!(r.contains("binding 3 (type 7): 0x910000000 +0x3440 buffer 0x22  <- HOLDS THE FAULTING ADDRESS"), "{r}");
         assert!(r.contains("BEFORE the draw's submission was submitted"), "{r}");
         assert!(!r.contains("binding 1 (type 6): 0x900000100 +0x100 buffer 0x11  <- HOLDS"), "{r}");
+    }
+
+    #[test]
+    fn a_dispatch_report_places_the_fault_against_its_descriptor_buffers_and_names_buffers_above() {
+        let ck = 0x5eed_0002;
+        let b = DescBinding { chunk: (0xa_0000_0000, 0x40_0000), set: (0x3f_f000, 1600), pool: (0xa_0041_0000, 0xa1_0000) };
+        note_dispatch(ck, 91, b);
+        note_mem(13, 0xa_0041_0000, 0xa1_0000, 0x33, 0, "");
+        let r = report(&[ck], 0xa_0040_1000).join("\n");
+        assert!(r.contains("dispatch #"), "{r}");
+        assert!(r.contains("(the fault 0x1000 past its end)"), "{r}");
+        assert!(r.contains("(the fault 0xf000 below its start)"), "{r}");
+        assert!(r.contains("starts 0xf000 above"), "{r}");
+        assert_eq!(relation(5, 4, 2), "INSIDE it at +0x1");
     }
 }

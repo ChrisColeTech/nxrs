@@ -189,6 +189,13 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                 crate::log::red(&format!("    {t:.2} s: {w}"));
             }
         }
+        let r = FREED.lock().unwrap();
+        if !r.is_empty() {
+            crate::log::red(&format!("  the last {} images destroyed with their memory (newest last):", r.len()));
+            for (t, c, s, w) in r.iter() {
+                crate::log::red(&format!("    {t:.2} s (timeline completed {c}, submitted {s}): {w}"));
+            }
+        }
     }
     if g.d.caps.device_fault {
         let f = g.d.fault.fp().get_device_fault_info_ext;
@@ -292,6 +299,23 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
 /// The last resources handed to be destroyed (an "invalid write" fault names freed memory: is it one of these?).
 static GONE: std::sync::Mutex<std::collections::VecDeque<(f64, String)>> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// The last images actually destroyed (their memory freed): (time, timeline completed and submitted then, what).
+static FREED: std::sync::Mutex<std::collections::VecDeque<(f64, u64, u64, String)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Notes an image whose memory is freed now (kept: the last 48), with the timeline then: a fault in freed memory
+/// whose last use's submission had not completed by then is a free before its last use (OOT-LOAD).
+pub fn note_freed(completed: u64, submitted: u64, what: impl FnOnce() -> String) {
+    if level() == 0 {
+        return;
+    }
+    let mut r = FREED.lock().unwrap();
+    if r.len() >= 48 {
+        r.pop_front();
+    }
+    r.push_back((crate::log::elapsed(), completed, submitted, what()));
+}
 
 /// Notes a resource handed to be destroyed once the GPU is past it (kept: the last 48).
 pub fn note_gone(what: impl FnOnce() -> String) {
