@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 translator = { path = "../translator" }
 
+# compile.rs lowers the C compiler's priority with setpriority between fork and exec
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # the donor gates its verify lane's bits on this feature (cro.rs); the lane itself is 3DS-W8
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("verify"))'] }
