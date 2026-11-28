@@ -255,6 +255,13 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       Lead left it out. Fast-core placement, pre-pass ahead, one-pass upload skip: moved nothing, removed; 12 lanes
       20.80 -> 20.64 ms for 13 ms more CPU. Replay busy ~20 ms in the fixed window against 15.8: pool sync 8.0,
       translation 6.0, lane joins 2.3, pre-pass 1.7 (~4.7 ms of it waiting on other threads).
+- [x] **OOT-HOST** (2026-11-28, disproved, doc only `docs/waves/OOT-HOST.md`). Host-importing the pools the CPU and
+      GPU both write every frame (20 pools, 88 MB, chosen by a 64-frame history): pool sync 8.69 -> 5.71 ms and
+      landings 3.43 -> 0.69 ms, but GPU 9.16 -> 24.62 ms a frame; house standing 47.6 / 43.5 -> 29.7 / 27.2
+      (`20261128-074701-host-base` vs `-081047-host-hot1`, [600, 640] s). `NXGFX_POOL=host` for all: 131 imports
+      refused, GPU 230 ms. Code taken out. Not built: the GPU copying a hot pool into VRAM itself each submission (no
+      CPU hashing, no PCIe reads per draw). Owner saw a fine grid on screen, not in any capture (open). Runs spend
+      ~11 of 15 min on the opening: a save that starts Link in his house would cut that.
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
