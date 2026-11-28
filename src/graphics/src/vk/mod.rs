@@ -23,7 +23,6 @@ pub mod gate;
 pub mod gmem;
 pub mod image;
 pub mod layout;
-pub mod hot;
 pub mod lazy;
 pub mod live;
 pub mod lost;
