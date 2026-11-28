@@ -983,6 +983,39 @@ fn wait_counters(
     }]
 }
 
+/// `NXRS_SLEEP_SPIN_US` (default 1000; 0 = the host's sleep alone): the last part of a SleepThread that is waited by
+/// yielding instead of the host's timer.
+fn sleep_spin() -> Duration {
+    static V: OnceLock<Duration> = OnceLock::new();
+    *V.get_or_init(|| {
+        let us = std::env::var("NXRS_SLEEP_SPIN_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1000);
+        Duration::from_micros(us)
+    })
+}
+
+/// SleepThread: as long as asked. Horizon wakes a sleeper on its tick (microseconds); the host's sleep wakes on its
+/// timer, ~0.6 ms past the time asked on this machine (Windows' high-resolution waitable timer). Ocarina of Time's job
+/// threads and its main thread back off with 20 us sleeps ~3 times a frame each and slept ~0.58 ms each (OOT-WAIT): a
+/// host sleep for all but the last `sleep_spin()` of it, then yields until the time is up.
+pub(crate) fn sleep_thread(ns: u64) {
+    let spin = sleep_spin();
+    let want = Duration::from_nanos(ns);
+    if spin.is_zero() {
+        std::thread::sleep(want);
+        return;
+    }
+    let until = Instant::now() + want;
+    if want > spin {
+        std::thread::sleep(want - spin);
+    }
+    while Instant::now() < until {
+        std::thread::yield_now();
+    }
+}
+
 fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
     let k = get();
     match imm {
@@ -996,7 +1029,7 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             let ns = c.x[0] as i64;
             if ns > 0 {
                 let t0 = acct_t0();
-                std::thread::sleep(Duration::from_nanos(ns as u64));
+                sleep_thread(ns as u64);
                 if let Some(t0) = t0 {
                     // keyed by the time asked for: what the host's sleep makes of it
                     crate::waitacct::add(
@@ -1504,6 +1537,23 @@ mod tests {
             assert!(second.is_some() && s.threads[0].is_none());
             assert!(s.threads[1].is_some(), "the other thread is untouched");
         }
+    }
+
+    /// OOT-WAIT: SleepThread sleeps as long as asked, not the host timer's ~0.6 ms: 20 us sleeps (Ocarina of Time's
+    /// job threads' backoff) average well under 0.3 ms (the host's sleep alone: ~0.58 ms each), and a longer one is
+    /// never short.
+    #[test]
+    fn sleep_thread_sleeps_as_long_as_asked() {
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            sleep_thread(20_000);
+        }
+        let each = t0.elapsed() / 20;
+        assert!(each >= Duration::from_micros(20) && each < Duration::from_micros(300), "20 us sleeps took {each:?} each");
+        let t0 = Instant::now();
+        sleep_thread(3_000_000);
+        let e = t0.elapsed();
+        assert!(e >= Duration::from_millis(3) && e < Duration::from_millis(5), "a 3 ms sleep took {e:?}");
     }
 
     #[test]
