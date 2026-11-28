@@ -1539,10 +1539,8 @@ mod tests {
         }
     }
 
-    /// OOT-WAIT: SleepThread sleeps as long as asked, not the host timer's ~0.6 ms: 20 us sleeps (Ocarina of Time's
-    /// job threads' backoff) average well under 0.3 ms (the host's sleep alone: ~0.58 ms each), and a longer one is
-    /// never short. Measured against the host's own sleep on the same machine, best of five tries each: a fixed bound
-    /// failed under load here (the whole workspace's tests at once) and on CI's Windows runner (316 us at best).
+    /// OOT-WAIT: SleepThread never returns before the time asked (20 us, Ocarina of Time's job threads' backoff, and
+    /// 3 ms). How much sooner than the host's timer it wakes is `sleep_thread_beats_the_host_timer` (opt-in).
     #[test]
     fn sleep_thread_sleeps_as_long_as_asked() {
         fn best(ns: u64, n: u32, f: fn(u64)) -> Duration {
@@ -1555,6 +1553,29 @@ mod tests {
                     let each = t0.elapsed() / n;
                     assert!(each >= Duration::from_nanos(ns), "{ns} ns sleeps took {each:?} each: short");
                     each
+                })
+                .min()
+                .unwrap()
+        }
+        best(20_000, 20, sleep_thread);
+        best(3_000_000, 1, sleep_thread);
+    }
+
+    /// OOT-WAIT's gain, opt-in (`cargo test -p runtime --lib -- --ignored sleep_thread_beats`): on this machine a 20 us
+    /// SleepThread beats the host's sleep (~0.58 ms on Windows' timer). Not in the default run: on CI's 2-core Windows
+    /// runner with the whole workspace's tests at once the yields lose the core (316 us, then 728 us against the
+    /// host's 678 us), so the comparison measured the runner's load, not the engine.
+    #[test]
+    #[ignore = "timing: needs an idle machine"]
+    fn sleep_thread_beats_the_host_timer() {
+        fn best(ns: u64, n: u32, f: fn(u64)) -> Duration {
+            (0..5)
+                .map(|_| {
+                    let t0 = Instant::now();
+                    for _ in 0..n {
+                        f(ns);
+                    }
+                    t0.elapsed() / n
                 })
                 .min()
                 .unwrap()
