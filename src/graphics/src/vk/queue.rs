@@ -1337,7 +1337,11 @@ pub(crate) mod wb_bufs {
             return;
         }
         let size = b.size;
-        let back = SHELF.lock().unwrap().put(size, b, KEEP, PER_SIZE);
+        // small buffers (the raw write logs' copies and the GPU compare's flags: one or more a submission and segment)
+        // are kept up to 16 MB of a size, more than `PER_SIZE` of them (OOT-FPS: at 64 the 64 KiB ones were made
+        // again ~7 times a second in Ocarina of Time's walk)
+        let per_size = PER_SIZE.max(((16u64 << 20) / size.max(1)) as usize);
+        let back = SHELF.lock().unwrap().put(size, b, KEEP, per_size);
         if let Some(b) = back {
             g.free_buffer(b);
         }
