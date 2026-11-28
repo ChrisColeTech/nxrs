@@ -25,3 +25,4 @@ pub mod profile;
 pub mod rt;
 pub mod sjlj;
 pub mod svc;
+pub mod waitacct;

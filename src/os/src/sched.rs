@@ -230,6 +230,21 @@ fn acquire(i: usize) {
     }
     let _mark = Mark(nxrt::profile::mark(nxrt::profile::W_CORE));
     let t0 = Instant::now();
+    // wait accounting: the time until a core is taken (any return below)
+    struct Acct(Instant);
+    impl Drop for Acct {
+        fn drop(&mut self) {
+            if nxrt::waitacct::on() {
+                nxrt::waitacct::add(
+                    nxrt::waitacct::K_CORE,
+                    0,
+                    self.0.elapsed().as_nanos() as u64,
+                    nxrt::waitacct::BY_NONE,
+                );
+            }
+        }
+    }
+    let _acct = Acct(t0);
     loop {
         if try_take(&mut st, i) {
             return;
@@ -326,15 +341,33 @@ pub fn me() -> Option<usize> {
 
 /// Gives the core up around `f` (a host function that blocks, as a guest thread blocked in the kernel would).
 pub fn without_core<R>(f: impl FnOnce() -> R) -> R {
-    match ME.get().filter(|_| !off()) {
+    // wait accounting: the host function the thread blocks in (its guest state names it)
+    let t0 = nxrt::waitacct::on().then(Instant::now);
+    let r = match ME.get().filter(|_| !off()) {
         Some(i) => {
             release(i);
             let r = f();
+            host_wait_done(t0);
             acquire(i);
-            r
+            return r;
         }
         None => f(),
-    }
+    };
+    host_wait_done(t0);
+    r
+}
+
+/// `waitacct`: a blocking host function's wait (since `t0`) ended, keyed by the host function's address.
+fn host_wait_done(t0: Option<Instant>) {
+    let Some(t0) = t0 else { return };
+    // SAFETY: the calling thread's own guest state
+    let pc = nxrt::kernel::current_cpu().map_or(0, |c| unsafe { (*c).pc });
+    nxrt::waitacct::add(
+        nxrt::waitacct::K_HOST,
+        pc,
+        t0.elapsed().as_nanos() as u64,
+        nxrt::waitacct::BY_NONE,
+    );
 }
 
 /// A checkpoint: hand the core to a better waiter (or anyone, with `to_any`), or take a core back after a steal.

@@ -88,6 +88,10 @@ struct Thread {
     wseq: u64,
     wobjs: Vec<SyncRef>,
     widx: Option<usize>,
+    /// Who ended the current wait (`waitacct`: a guest handle, a host thread, or `BY_NONE`), and whether a
+    /// condition variable's signaller set it (the lock's later handoff then does not overwrite it).
+    wby: u32,
+    wsig: bool,
     /// When the current wait times out (None: no time limit), for the thread dump.
     wuntil: Option<Instant>,
     cv: Arc<Condvar>,
@@ -292,7 +296,19 @@ impl State {
         best
     }
 
+    /// The calling thread as the one that ends a wait (`waitacct`; only when it is on).
+    fn waker(&self) -> u32 {
+        match CUR.get().and_then(|c| self.threads.get(c)?.as_ref()) {
+            Some(t) => t.handle,
+            None => crate::waitacct::waker(),
+        }
+    }
+
     fn wake(&mut self, i: usize, res: u64) {
+        if crate::waitacct::on() && !self.t(i).wsig {
+            let by = self.waker();
+            self.t(i).wby = by;
+        }
         let t = self.t(i);
         t.wkind = Wait::None;
         t.woke = true;
@@ -530,6 +546,8 @@ fn block<'a>(
     t.wkind = kind;
     t.woke = false;
     t.wseq = s;
+    t.wby = crate::waitacct::BY_NONE;
+    t.wsig = false;
     if ns == 0 {
         t.wkind = Wait::None;
         return (g, R_TIMEOUT);
@@ -556,6 +574,19 @@ fn block<'a>(
     }
     let r = g.t(i).wres;
     (g, r)
+}
+
+/// `waitacct`: thread i's wait (`kind` on `key`, since `t0`) ended; who ended it is the thread's `wby`.
+fn acct(g: &mut State, i: usize, kind: u8, key: u64, t0: Option<Instant>) {
+    if let Some(t0) = t0 {
+        let by = g.t(i).wby;
+        crate::waitacct::add(kind, key, t0.elapsed().as_nanos() as u64, by);
+    }
+}
+
+/// The start of a wait when the accounting is on.
+fn acct_t0() -> Option<Instant> {
+    crate::waitacct::on().then(Instant::now)
 }
 
 fn cur(svc: u32) -> usize {
@@ -757,6 +788,8 @@ impl Kernel {
             wseq: 0,
             wobjs: vec![],
             widx: None,
+            wby: 0,
+            wsig: false,
             cv: Arc::new(Condvar::new()),
             tls,
             cpu,
@@ -857,6 +890,7 @@ fn thread_body(slot: usize) {
         unsafe { ((tls + 0x110) as *mut u32).write_unaligned(t.id as u32) };
     }
     let core = lock(&k.g).t(slot).core;
+    crate::waitacct::thread_start(handle, entry);
     sched().thread_start(handle, core);
     crate::profile::add_current(handle, cpu);
     CPU.set(cpu);
@@ -961,7 +995,16 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
         0x0B => {
             let ns = c.x[0] as i64;
             if ns > 0 {
+                let t0 = acct_t0();
                 std::thread::sleep(Duration::from_nanos(ns as u64));
+                if let Some(t0) = t0 {
+                    crate::waitacct::add(
+                        crate::waitacct::K_SLEEP,
+                        0,
+                        t0.elapsed().as_nanos() as u64,
+                        crate::waitacct::BY_NONE,
+                    );
+                }
             } else {
                 std::thread::yield_now();
             }
@@ -1060,7 +1103,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 let t = g.t(i);
                 t.waddr = addr;
                 t.wtag = tag;
+                let t0 = acct_t0();
                 (g, r) = block(g, i, Wait::Lock, -1);
+                acct(&mut g, i, crate::waitacct::K_MUTEX, addr, t0);
             }
             drop(g);
             c.x[0] = r;
@@ -1083,7 +1128,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 t.wtag = tag;
             }
             g.lock_handoff(addr);
-            let (g, r) = block(g, i, Wait::CondVar, ns);
+            let t0 = acct_t0();
+            let (mut g, r) = block(g, i, Wait::CondVar, ns);
+            acct(&mut g, i, crate::waitacct::K_CONDVAR, key, t0);
             drop(g);
             c.x[0] = r;
         }
@@ -1097,6 +1144,12 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                     break;
                 };
                 let (a, tag) = (g.t(w).waddr, g.t(w).wtag);
+                if crate::waitacct::on() {
+                    // the signaller ended this wait, not the lock's later handoff
+                    let by = g.waker();
+                    g.t(w).wby = by;
+                    g.t(w).wsig = true;
+                }
                 g.lock_acquire_for(w, a, tag);
                 n += 1;
             }
@@ -1137,7 +1190,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             } else {
                 g.t(i).waddr = addr;
                 let r;
+                let t0 = acct_t0();
                 (g, r) = block(g, i, Wait::Address, ns);
+                acct(&mut g, i, crate::waitacct::K_ADDRESS, addr, t0);
                 r
             };
             drop(g);
@@ -1257,8 +1312,12 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 } else {
                     g.t(i).wobjs = objs.clone();
                     g.t(i).widx = None;
+                    let t0 = acct_t0();
                     (g, r) = block(g, i, Wait::Sync, ns);
                     idx = g.t(i).widx;
+                    // the object that ended the wait (the first, on a timeout)
+                    let h = hs.get(idx.unwrap_or(0)).copied().unwrap_or(0);
+                    acct(&mut g, i, crate::waitacct::K_SYNC, h as u64, t0);
                     g.t(i).wobjs.clear();
                 }
                 for &o in &objs {
@@ -1384,6 +1443,8 @@ mod tests {
                 wseq: 0,
                 wobjs: vec![],
                 widx: None,
+                wby: 0,
+                wsig: false,
                 cv: Arc::new(Condvar::new()),
                 tls: 0,
                 cpu: core::ptr::null_mut(),
