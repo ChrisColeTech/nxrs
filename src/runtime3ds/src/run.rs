@@ -9,6 +9,32 @@ use crate::interp;
 use crate::svc;
 use crate::thread::ThreadState;
 use crate::Process3ds;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// send-back evidence probes (set RUNTIME3DS_PROBE=1); bounded, the boot log only
+static PROBE_BUDGET: AtomicU64 = AtomicU64::new(0);
+static PROBE_RETURN: AtomicU64 = AtomicU64::new(0);
+static PROBE_FAULT: AtomicU64 = AtomicU64::new(0);
+static PROBE_ENTRY: AtomicU64 = AtomicU64::new(0);
+
+fn probe() -> bool {
+    std::env::var_os("RUNTIME3DS_PROBE").is_some()
+}
+
+fn sp_words(process: &Process3ds, sp: u32) -> String {
+    let mut text = String::new();
+    for i in 0..8u32 {
+        text.push_str(&format!("{:#x} ", process.memory.read32(sp.wrapping_add(i * 4))));
+    }
+    text
+}
+
+const ROUTINE_START: u32 = 0x0033_683C;
+const ROUTINE_END: u32 = 0x0033_68A0;
+
+fn in_routine(address: u32) -> bool {
+    (ROUTINE_START..ROUTINE_END).contains(&(address & !1))
+}
 
 /// the Host struct the generated code reads; the callbacks reach the thread through ctx.user
 pub(crate) static HOST: context::Host = context::Host {
@@ -109,6 +135,7 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
             break;
         }
         let address = state.ctx.r[15] | state.ctx.thumb as u32;
+        let jumped_from = address;
         let code = process.library.lock().unwrap().lookup(address);
         let before = state.ctx.budget;
         if let Some(code) = code {
@@ -119,6 +146,33 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
             let _returned = unsafe { code(&mut state.ctx) };
             let spent = (before - state.ctx.budget).max(0) as u64;
             process.stats.recompiled.fetch_add(spent, std::sync::atomic::Ordering::Relaxed);
+            if probe() {
+                let pc = state.ctx.r[15] & !1;
+                if state.ctx.exit == context::EXIT_BUDGET
+                    && pc == 0x0033_6854
+                    && PROBE_BUDGET.fetch_add(1, Ordering::Relaxed) < 3
+                {
+                    process.say(format!(
+                        "probe budget-cut: from {jumped_from:#x} to pc {:#x} exit {} lr {:#x} sp {:#x} r0 {:#x} r1 {:#x} sp: {}",
+                        state.ctx.r[15], state.ctx.exit, state.ctx.r[14], state.ctx.r[13], state.ctx.r[0], state.ctx.r[1],
+                        sp_words(process, state.ctx.r[13])
+                    ));
+                }
+                if in_routine(jumped_from) && !in_routine(pc) && PROBE_RETURN.fetch_add(1, Ordering::Relaxed) < 1 {
+                    process.say(format!(
+                        "probe return: from {jumped_from:#x} to pc {:#x} exit {} lr {:#x} sp {:#x} r0 {:#x} r1 {:#x} sp: {}",
+                        state.ctx.r[15], state.ctx.exit, state.ctx.r[14], state.ctx.r[13], state.ctx.r[0], state.ctx.r[1],
+                        sp_words(process, state.ctx.r[13])
+                    ));
+                }
+                let stats = process.memory.stats();
+                if stats.faults > 0 && PROBE_FAULT.fetch_add(1, Ordering::Relaxed) < 1 {
+                    process.say(format!(
+                        "probe first fault: {} at {:#x} after {jumped_from:#x} pc {:#x} r0 {:#x} r1 {:#x}",
+                        stats.faults, stats.last_fault, state.ctx.r[15], state.ctx.r[0], state.ctx.r[1]
+                    ));
+                }
+            }
             match state.ctx.exit {
                 context::EXIT_NONE | context::EXIT_UNWIND => {}
                 context::EXIT_SVC => {
@@ -143,6 +197,14 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
                     state.ctx.r[15], state.ctx.r[0], state.ctx.r[1], state.ctx.r[2], state.ctx.r[3], state.ctx.r[14]
                 ));
             }
+            if probe() && PROBE_ENTRY.fetch_add(1, Ordering::Relaxed) < 3 {
+                process.say(format!(
+                    "probe interp resume: pc {:#x} lr {:#x} sp {:#x} r0 {:#x} r1 {:#x} c {} sp: {}",
+                    state.ctx.r[15], state.ctx.r[14], state.ctx.r[13], state.ctx.r[0], state.ctx.r[1], state.ctx.c,
+                    sp_words(process, state.ctx.r[13])
+                ));
+            }
+            let interp_from = state.ctx.r[15];
             let mut miss_log = process.miss_log();
             let lookup = |address: u32| process.library.lock().unwrap().lookup(address);
             let mut sink = |c: &mut Context, number: u32| {
@@ -152,6 +214,23 @@ pub fn run_slice(process: &Process3ds, state: &mut ThreadState, slice: i32) -> S
             interp::run_block(&mut state.ctx, &process.memory, &lookup, &mut miss_log, &mut sink, 4096);
             let spent = (before - state.ctx.budget).max(0) as u64;
             process.stats.interpreted.fetch_add(spent, std::sync::atomic::Ordering::Relaxed);
+            if probe() {
+                let pc = state.ctx.r[15] & !1;
+                if in_routine(interp_from) && !in_routine(pc) && PROBE_RETURN.fetch_add(1, Ordering::Relaxed) < 1 {
+                    process.say(format!(
+                        "probe interp return: from {interp_from:#x} to pc {:#x} lr {:#x} sp {:#x} r0 {:#x} r1 {:#x} c {} sp: {}",
+                        state.ctx.r[15], state.ctx.r[14], state.ctx.r[13], state.ctx.r[0], state.ctx.r[1], state.ctx.c,
+                        sp_words(process, state.ctx.r[13])
+                    ));
+                }
+                let stats = process.memory.stats();
+                if stats.faults > 0 && PROBE_FAULT.fetch_add(1, Ordering::Relaxed) < 1 {
+                    process.say(format!(
+                        "probe first fault (interp branch): {} at {:#x} from {interp_from:#x} pc {:#x} r0 {:#x} r1 {:#x}",
+                        stats.faults, stats.last_fault, state.ctx.r[15], state.ctx.r[0], state.ctx.r[1]
+                    ));
+                }
+            }
         }
         // the settle: the loan back to the kernel, the trail counted, the tick site forgotten
         let settled = hostfast::settle(&mut state.ctx);

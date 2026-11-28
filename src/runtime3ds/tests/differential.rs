@@ -53,6 +53,15 @@ const WORDS_CLEAR: [u32; 10] = [
     0xEF00_0003, // svc 0x03
 ];
 
+/// the exact Sonic loop body: conditional stores/subtract/branch on C
+const WORDS_COND: [u32; 5] = [
+    0x28A0_500C, // stmiacs r0!, {r2, r3, r12, lr}
+    0x28A0_500C, // stmiacs r0!, {r2, r3, r12, lr}
+    0x2251_1020, // subscs r1, r1, #0x20
+    0x2AFF_FFFB, // bcs the first store
+    0xEF00_0003, // svc 0x03
+];
+
 fn bare_context(memory: &Memory, vfp: &mut [u32; 32], fpscr: &mut u32) -> Box<Context> {
     Box::new(Context {
         r: [0; 16],
@@ -109,10 +118,15 @@ fn fill(memory: &Memory) {
 
 /// the interpreter walks until the svc (the end of the tested window)
 fn interpreted(memory: &Arc<Memory>) -> (Box<Context>, Box<[u32; 32]>, u32) {
+    interpreted_with(memory, |_| {})
+}
+
+fn interpreted_with(memory: &Arc<Memory>, setup: impl Fn(&mut Context)) -> (Box<Context>, Box<[u32; 32]>, u32) {
     let mut vfp = Box::new([0u32; 32]);
     let mut fpscr = 0u32;
     let mut ctx = bare_context(memory, &mut vfp, &mut fpscr);
     begin(&mut ctx);
+    setup(&mut ctx);
     let mut log = NoLog;
     let mut sink = |_c: &mut Context, _n: u32| {};
     loop {
@@ -155,8 +169,17 @@ impl Harness {
 }
 
 fn recompiled(memory: Arc<Memory>, library: runtime3ds::dispatch::Library) -> (Box<Process3ds>, &'static mut ThreadState) {
+    recompiled_with(memory, library, |_| {})
+}
+
+fn recompiled_with(
+    memory: Arc<Memory>,
+    library: runtime3ds::dispatch::Library,
+    setup: impl Fn(&mut Context),
+) -> (Box<Process3ds>, &'static mut ThreadState) {
     let mut harness = Harness::new(library, memory);
     begin(&mut harness.state.ctx);
+    setup(&mut harness.state.ctx);
     harness.run(50_000);
     (harness.process, harness.state)
 }
@@ -277,4 +300,94 @@ fn the_memclr_loop_agrees() {
     }
     assert_eq!(memory2.stats().faults, faults_before, "the populated page tables took every store");
     assert_eq!(mismatches, 0, "the interpreter and the recompiled loop agree");
+}
+
+fn cond_setup(ctx: &mut Context, carry: u8) {
+    ctx.c = carry;
+    ctx.r[1] = 0x40;
+    ctx.r[2] = 0;
+    ctx.r[3] = 0;
+    ctx.r[12] = 0;
+    ctx.r[14] = 0;
+}
+
+/// the exact conditional zero-fill loop, C set and clear: the interpreter and the recompiled C
+/// must agree on the 32-byte output, r0/r1 and nzcv (this settles the mid-block resume)
+#[test]
+fn the_conditional_zero_fill_agrees() {
+    let Some((_library, path, _dump, title)) = loaded_library("differential-cond", &WORDS_COND) else {
+        eprintln!("skipping: NXRS_3DS_CC_TESTS is off, the compile lane did not run");
+        return;
+    };
+    let code_bytes = title.code().unwrap();
+    for carry in [1u8, 0u8] {
+        let memory = test_memory(&code_bytes);
+        for i in 0..24u32 {
+            memory.write32(HEAP + i * 4, 0xAAAA_AAAA);
+        }
+        let (interp_ctx, _vfp, _fpscr) = interpreted_with(&memory, |ctx| cond_setup(ctx, carry));
+
+        let memory2 = Arc::new(Memory::new().unwrap());
+        memory2
+            .map(BASE, code_bytes.len().next_multiple_of(0x1000) as u32, Perm::R, State::Code, Kind::Exe)
+            .unwrap();
+        for (i, word) in WORDS_COND.iter().enumerate() {
+            memory2.load_bytes(BASE + i as u32 * 4, &word.to_le_bytes());
+        }
+        memory2.map(HEAP, 0x1000, Perm::Rw, State::Private, Kind::Heap).unwrap();
+        memory2.commit(HEAP, 0x1000, Perm::Rw, State::Private, Kind::Heap).unwrap();
+        for i in 0..24u32 {
+            memory2.write32(HEAP + i * 4, 0xAAAA_AAAA);
+        }
+        let library = runtime3ds::dispatch::Library::open(&path).unwrap();
+        let (process, state) = recompiled_with(memory2.clone(), library, |ctx| cond_setup(ctx, carry));
+        let report = process.report(PROGRAM_ID, String::new());
+        assert!(report.recompiled > 0, "the recompiled C ran the conditional loop");
+
+        let mut mismatches = 0;
+        for r in [0usize, 1, 2, 3, 12, 14] {
+            if interp_ctx.r[r] != state.ctx.r[r] {
+                mismatches += 1;
+                eprintln!(
+                    "C={carry} mismatch r{r}: interp {:#x}, recompiled {:#x}",
+                    interp_ctx.r[r], state.ctx.r[r]
+                );
+            }
+        }
+        for (name, a, b) in [
+            ("n", interp_ctx.n, state.ctx.n),
+            ("z", interp_ctx.z, state.ctx.z),
+            ("c", interp_ctx.c, state.ctx.c),
+            ("v", interp_ctx.v, state.ctx.v),
+        ] {
+            if a != b {
+                mismatches += 1;
+                eprintln!("C={carry} mismatch flag {name}: interp {a}, recompiled {b}");
+            }
+        }
+        for i in 0..24u32 {
+            let a = memory.read32(HEAP + i * 4);
+            let b = memory2.read32(HEAP + i * 4);
+            if a != b {
+                mismatches += 1;
+                eprintln!("C={carry} mismatch heap+{:#x}: interp {a:#x}, recompiled {b:#x}", i * 4);
+            }
+        }
+        if carry == 1 {
+            assert_eq!(interp_ctx.r[0], HEAP + 0x60, "C=1 fills three 32-byte blocks");
+            assert_eq!(interp_ctx.r[1], 0xFFFF_FFE0, "C=1 counts down to -32");
+            assert_eq!(interp_ctx.c, 0);
+            for i in 0..24u32 {
+                assert_eq!(memory.read32(HEAP + i * 4), 0, "C=1 zeroes the block");
+            }
+        } else {
+            assert_eq!(interp_ctx.r[0], HEAP, "C=0 stores nothing");
+            assert_eq!(interp_ctx.r[1], 0x40, "C=0 leaves the length");
+            assert_eq!(interp_ctx.c, 0);
+            for i in 0..24u32 {
+                assert_eq!(memory.read32(HEAP + i * 4), 0xAAAA_AAAA, "C=0 leaves memory alone");
+            }
+        }
+        assert_eq!(mismatches, 0, "the conditional loop agrees with C={carry}");
+    }
 }

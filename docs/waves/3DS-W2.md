@@ -257,31 +257,41 @@ Numbers, same Sonic boot and 20 s wall cap:
 
 The fault hypothesis is therefore **confirmed only for the page-table half**: the noise from
 ordinary accesses inside the committed LINEAR range is gone. The remaining faults are not page-table
-misses. `last_fault` is `0x0`, and the interpreter-entry log shows the real shape:
+misses and not a flag/decode bug in this unit. The exact loop was then differentialled: the four
+words `0x28A0500C, 0x28A0500C, 0x22511020, 0x2AFFFFFB` (conditional stores, `subscs`, `bcs`), once
+with C=1 and once with C=0, through the interpreter and the recompiled C, comparing the 32-byte
+output, r0/r1/r2/r3/r12/lr and nzcv: **0 mismatches both ways** (`differential::the_conditional_zero_fill_agrees`).
+So the interpreter's conditional `stm`/`subs`/`bcs` and the flag carry are correct; discard the
+"bad flags/missing prologue" idea.
+
+Probe evidence with `RUNTIME3DS_PROBE=1` (bounded, first 3 resumes and the first fault):
 
 ```
-interpreter entry 1 at 0x336854: r0 0x1400f7f0 r1 0x100c80 r2 0x0 r3 0x0 lr 0x0
-interpreter entry 2 at 0x336854: r0 0x1400f8b0 r1 0x100c80 ...
-interpreter entry 1000 at 0x336854: r0 0x17e388b0 r1 0x100c80 ...
-interpreter entry 2000 at 0x336854: r0 0x1bc818b0 r1 0x100c80 ...
+probe interp resume: pc 0x336854 lr 0x0 sp 0xfffff8c r0 0x1400f7f0 r1 0x100c80 c 1
+  sp: 0x28104c 0x2810b8 0x7d1 0x546a28 0x285df8 0x3c80000 0x0 0x0
+probe interp resume: pc 0x336854 lr 0x0 sp 0xfffff8c r0 0x1400f8b0 r1 0x100c80 c 1
+...
+probe first fault (interp branch): 60592 at 0x0 from 0x336854 pc 0x336854 r0 0x1c00ecb0 r1 0x100c80
+interpreter entry 3000 at 0x336854: r0 0x1fac7cb0 ...
+interpreter entry 6000 at 0x336854: r0 0x2b5a00b0 ...
 ```
 
-The title is doing a legitimate 1 MiB memclr (`r1 = 0x100C80`) at `0x1400F7F0`, then the next one
-~0x10000 further, ~2200 times across the 0x14000000 LINEAR window. It calls the memclr at
-`0x00336854`; the entry tables only have `0x00336850`/`0x0033683C` for that code (discovery merged
-the variants), so the interpreter starts mid-function with `lr = 0`. The loop itself runs, but its
-shared epilogue restores `lr` from a stack frame the missing prologue never made, returns to
-address 0, and the interpreter then fetches zeros (one fault per fetch) — that is the residual
-9.7M and why `last_fault` is 0. It is not a page-table miss and not fixed by mapping more memory.
+`lr = 0` is the fill value (the stores write r2, r3, r12, lr), not a missing return address; the
+stack at the resume holds `0x28104C`, `0x2810B8`, and the `0x3C80000` length, so the resume is the
+ABI's mid-block continuation. The loop runs with C=1 and does decrement `r1`. The caller keeps
+calling it with `r0` advancing: entry 2000 is still inside the window (`0x1BC818B0`), the first
+fault is when `r0 = 0x1C00ECB0` (just past `0x14000000 + 0x08000000`), and by 60 s the entry log is
+`r0 = 0x2B5A00B0` - the title's allocator/clear walk goes hundreds of MB past the LINEAR window and
+the kernel faults each out-of-range store. That is the residual, and it is not fixed by mapping more
+pages or by seeding the memclr entry; it is the title's heap/clear loop over a size/end it got from
+the memory services, i.e. a W2/W3 boundary (real allocator state / named services), not a
+`runtime3ds` loop-semantics defect.
 
-This is the W2/W3 boundary the send-back asked for, with the exact site: `0x00336854`, the
-libctru memclr entry, `r0 ∈ 0x1400F7F0…0x1BC818B0`, `r1 = 0x100C80`, `lr = 0`. Seeding
-`0x00336854` in `discovered.tsv` is refused by `hints::new_functions` because the address is owned
-as an instruction of the 0x336850 function; that is a translator3ds discovery/hints boundary, not
-this unit. With 0x336854 unhinted the clear runs interpreted and the budget ends before
-`CreateThread`; no thread handles exist to log. Re-running with the containing-function lookup was
-explicitly not resurrected.
+The exact cross-unit evidence a lead needs: `0x00336854` (the conditional zero-fill entry), resume
+stack `0xFFFFF8C`, `r0` walking `0x1400F7F0 -> 0x1C00ECB0 -> 0x2B5A00B0`, `r1 = 0x100C80`, first
+fault after 60 592 faults at `0x1C00ECB0`, `last_fault` not recorded for stores (the write path
+does not set it; the read path would). No `CreateThread` is reached; the svc ledger is unchanged.
 
-After the fix the same suites are green (`cargo test -p runtime3ds` 23+2+2+13, differential 2
+After the fix the same suites are green (`cargo test -p runtime3ds` 23+2+3+13, differential 3
 tests; `--workspace --exclude renhdrum` green).
 
