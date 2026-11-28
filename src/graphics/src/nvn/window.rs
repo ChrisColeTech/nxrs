@@ -227,7 +227,7 @@ nvn_fns! {
             if wait > 0 { sleep_until(until); }
             // the GPU side only: the vsync pacing above is not the GPU's
             let t0 = std::time::Instant::now();
-            if tk != 0 { vk::queue::present_wait(tk); }
+            if tk != 0 { let _w = vk::queue::GuestWait::new(); vk::queue::present_wait(tk); }
             vk::perf::add(vk::perf::C::WaitAcquireNs, t0.elapsed().as_nanos() as u64);
         });
         frame_started(t_in, super::device::now_ns());

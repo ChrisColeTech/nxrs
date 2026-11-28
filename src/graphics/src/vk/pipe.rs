@@ -296,7 +296,57 @@ pub static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// `<data>/pipeline-crashed.bin` at the next start and not compiled again: its draws are skipped (a red line says so).
 /// Donkey Kong Bananza: the NVIDIA compiler (nvgpucomp64) faults on one vertex + pixel pair, whole or linked from
 /// parts; each stage compiles with other partners. One session ends there, the next ones go on without that program.
+///
+/// Only a session that died of an unhandled exception while compiles were in flight lists them (Windows: the
+/// process's unhandled-exception filter writes `pipeline-compiling.crash` beside the marker, `crash_filter`). A
+/// session ended any other way (killed by PID, a Rust allocation failure's abort at the memory cap, a panic) left the
+/// marker too, and listed whatever was compiling at that moment as a "compiler crash" (OOT-FIX: two of Ocarina of
+/// Time's scene pipelines, two draws a frame skipped from 2026-11-27 05:43 on, after OOT-COMBO's runs died at the
+/// memory cap and were stopped at their time limit). Those keys are now compiled again.
 static COMPILERS: CompileJournal = CompileJournal::new();
+
+/// The crash mark beside the compile marker: present at start = the last session died of an unhandled exception.
+fn crash_mark(marker: &std::path::Path) -> PathBuf {
+    marker.with_extension("crash")
+}
+
+/// Windows: the process's last-chance filter. Reached only when no handler took the exception (the runtime's crash
+/// reporter leaves a fault in another module, such as the driver's compiler, to the handlers after it): with compiles
+/// in flight it writes the crash mark, then hands the exception to the filter it replaced.
+#[cfg(windows)]
+mod crash_filter {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SetUnhandledExceptionFilter, EXCEPTION_POINTERS, LPTOP_LEVEL_EXCEPTION_FILTER,
+    };
+
+    static PREV: AtomicUsize = AtomicUsize::new(0);
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    pub fn install() {
+        ONCE.call_once(|| {
+            // SAFETY: replaces the process's top-level filter with one that chains to the previous filter
+            let prev = unsafe { SetUnhandledExceptionFilter(Some(filter)) };
+            PREV.store(prev.map_or(0, |f| f as usize), Ordering::SeqCst);
+        });
+    }
+
+    unsafe extern "system" fn filter(ep: *const EXCEPTION_POINTERS) -> i32 {
+        super::COMPILERS.dying();
+        let prev = PREV.load(Ordering::SeqCst);
+        if prev != 0 {
+            // SAFETY: the value SetUnhandledExceptionFilter returned, a filter of this signature
+            let f: LPTOP_LEVEL_EXCEPTION_FILTER = Some(std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(*const EXCEPTION_POINTERS) -> i32,
+            >(prev));
+            if let Some(f) = f {
+                return f(ep);
+            }
+        }
+        0 // EXCEPTION_CONTINUE_SEARCH: the process ends as it would have
+    }
+}
 static CRASHED: Mutex<Option<std::collections::HashSet<GfxKey>>> = Mutex::new(None);
 
 struct Inflight {
@@ -311,6 +361,10 @@ struct Inflight {
 struct CompileJournal {
     stopping: AtomicBool,
     inflight: Mutex<Inflight>,
+    /// compiles in flight (read by the crash filter, which takes no lock)
+    count: std::sync::atomic::AtomicUsize,
+    /// the crash mark's path, set at the first compile
+    mark: std::sync::OnceLock<PathBuf>,
 }
 
 impl CompileJournal {
@@ -322,11 +376,23 @@ impl CompileJournal {
                 marker: None,
                 closed: false,
             }),
+            count: std::sync::atomic::AtomicUsize::new(0),
+            mark: std::sync::OnceLock::new(),
         }
     }
 
     fn stopping(&self) -> bool {
         self.stopping.load(Ordering::Acquire)
+    }
+
+    /// The process is dying of an unhandled exception: with compiles in flight, the crash mark says so to the next
+    /// session (`load_crashed`).
+    fn dying(&self) {
+        if self.count.load(Ordering::SeqCst) != 0 {
+            if let Some(p) = self.mark.get() {
+                let _ = std::fs::write(p, b"crash");
+            }
+        }
     }
 
     fn note(&self, path: &std::path::Path, k: &GfxKey, on: bool) {
@@ -335,11 +401,17 @@ impl CompileJournal {
             return;
         }
         if on {
+            if self.mark.get().is_none() {
+                let _ = self.mark.set(crash_mark(path));
+                #[cfg(windows)]
+                crash_filter::install();
+            }
             s.marker = Some(path.to_path_buf());
             s.keys.push(*k);
         } else if let Some(i) = s.keys.iter().position(|x| x == k) {
             s.keys.swap_remove(i);
         }
+        self.count.store(s.keys.len(), Ordering::SeqCst);
         if s.keys.is_empty() {
             let _ = std::fs::remove_file(path);
         } else {
@@ -357,6 +429,7 @@ impl CompileJournal {
         let mut s = self.inflight.lock().unwrap();
         s.closed = true;
         s.keys.clear();
+        self.count.store(0, Ordering::SeqCst);
         if let Some(path) = &s.marker {
             match std::fs::remove_file(path) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
@@ -431,7 +504,20 @@ fn load_crashed(
 ) -> std::collections::HashSet<GfxKey> {
     let mut set = std::collections::HashSet::new();
     let old = read_keys(&std::fs::read(list).unwrap_or_default());
-    let new = read_keys(&std::fs::read(inflight).unwrap_or_default());
+    let mut new = read_keys(&std::fs::read(inflight).unwrap_or_default());
+    // Windows: listed only when the session died of an unhandled exception with them in flight (the crash mark);
+    // ended any other way (killed, an abort), they were only in flight then (`COMPILERS`)
+    let mark = crash_mark(inflight);
+    let crashed = !cfg!(windows) || mark.exists();
+    let _ = std::fs::remove_file(&mark);
+    if !new.is_empty() && !crashed {
+        crate::vklog!(
+            "{} pipeline(s) were compiling when the last session ended, not by a crash (no {}): compiled again",
+            new.len(),
+            mark.display()
+        );
+        new.clear();
+    }
     if !new.is_empty() {
         let mut all = std::fs::read(list).unwrap_or_default();
         for k in &new {
@@ -1205,6 +1291,18 @@ impl Gpu {
         // it crashed the driver's compiler in an earlier session: not compiled again, its draws are skipped
         if crashed(self, k) {
             crate::log::red_once("a pipeline that crashed the driver's compiler in an earlier session is not compiled again: its draws are skipped (pipeline-crashed.bin)");
+            let names: Vec<String> = k
+                .shaders
+                .iter()
+                .filter(|s| **s != [0u8; 8])
+                .map(|s| s.iter().map(|b| format!("{b:02x}")).collect())
+                .collect();
+            crate::vklog!(
+                "crash-listed pipeline skipped: shaders {}, targets {:?}, depth {}",
+                names.join(" + "),
+                &k.colors[..k.ncolor as usize],
+                k.depth
+            );
             note_crashed_seen(at);
             return None;
         }
@@ -1741,12 +1839,47 @@ mod compile_journal_tests {
             let journal = CompileJournal::new();
             journal.note(&tmp.marker(), &key(2), true);
             journal.note(&tmp.marker(), &part, true);
-            // No shutdown: dropping this CPU fixture simulates the journal left by an abrupt process death.
+            // No shutdown: dropping this CPU fixture simulates the journal left by an abrupt process death; the
+            // unhandled-exception filter's mark says the death was a crash.
+            journal.dying();
         }
+        assert!(crash_mark(&tmp.marker()).exists());
         let set = load_crashed(&tmp.marker(), &tmp.blacklist());
         assert_eq!(set, std::collections::HashSet::from([key(1), key(2), part]));
         assert!(std::fs::read(tmp.blacklist()).unwrap().starts_with(&old));
         assert!(!tmp.marker().exists());
+        assert!(!crash_mark(&tmp.marker()).exists());
+    }
+
+    /// OOT-FIX: a session killed by PID or aborted at the memory cap with compiles in flight lists nothing (Windows,
+    /// where the crash filter writes the mark); the list as it was stays.
+    #[cfg(windows)]
+    #[test]
+    fn an_end_without_a_crash_lists_nothing() {
+        let tmp = Scratch::new();
+        let old = Key::Gfx(key(1)).to_bytes();
+        std::fs::write(tmp.blacklist(), &old).unwrap();
+        {
+            let journal = CompileJournal::new();
+            journal.note(&tmp.marker(), &key(2), true);
+            // killed here: no dying(), no shutdown
+        }
+        assert!(tmp.marker().exists());
+        let set = load_crashed(&tmp.marker(), &tmp.blacklist());
+        assert_eq!(set, std::collections::HashSet::from([key(1)]));
+        assert_eq!(std::fs::read(tmp.blacklist()).unwrap(), old);
+        assert!(!tmp.marker().exists());
+    }
+
+    /// The crash mark is written only with compiles in flight.
+    #[test]
+    fn dying_with_nothing_compiling_leaves_no_mark() {
+        let tmp = Scratch::new();
+        let journal = CompileJournal::new();
+        journal.note(&tmp.marker(), &key(2), true);
+        journal.note(&tmp.marker(), &key(2), false);
+        journal.dying();
+        assert!(!crash_mark(&tmp.marker()).exists());
     }
 
     #[test]
@@ -1776,6 +1909,7 @@ mod compile_journal_tests {
     fn clean_exit_before_any_compile_preserves_unconsumed_previous_crash() {
         let tmp = Scratch::new();
         std::fs::write(tmp.marker(), Key::Gfx(key(4)).to_bytes()).unwrap();
+        std::fs::write(crash_mark(&tmp.marker()), b"crash").unwrap();
         let journal = CompileJournal::new();
         journal.shutdown().unwrap();
         journal.note(&tmp.marker(), &key(5), true);

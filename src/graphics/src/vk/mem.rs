@@ -1221,6 +1221,7 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     // standing and could send the device's older bytes back over newer GPU writes); pages that only came back from
     // the device unchanged are no CPU write: not uploaded, not told to the textures (M2), and the pool stays cold (L5)
     if p.buf.is_some() {
+        p.bind_written(g, sub, &ranges);
         let mut back = Vec::new();
         for &(ra, rn) in &ranges {
             if super::upskip::on() {
@@ -1304,7 +1305,7 @@ impl Pool {
         v
     }
 
-    fn ensure_buffer(&mut self, g: &Gpu, sub: &mut super::queue::Sub) -> Result<(), String> {
+    pub(super) fn ensure_buffer(&mut self, g: &Gpu, sub: &mut super::queue::Sub) -> Result<(), String> {
         if self.buf.is_some() {
             return Ok(());
         }
@@ -1593,6 +1594,21 @@ impl Pool {
         self.deferred = keep;
     }
 
+    /// CPU-written ranges about to be uploaded: a pool given its buffer only for the raw global memory table and backed
+    /// in granules (`gmem::table_only`) binds their granules first (filled with the guest's bytes), since only a
+    /// shader's loaded pointer may read them and nothing else would bind them; the upload into an unbound granule
+    /// would be dropped.
+    fn bind_written(&mut self, g: &Gpu, sub: &mut super::queue::Sub, ranges: &[(u64, u64)]) {
+        if self.gran.is_none() || ranges.is_empty() || !super::gmem::table_only(self.identity) {
+            return;
+        }
+        for &(a, n) in ranges {
+            if let Err(e) = self.bind(g, sub, a, n) {
+                crate::log::red_once(&e);
+            }
+        }
+    }
+
     fn upload_now(&self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
         // SAFETY: committed guest memory of this pool (the CPU-written range being uploaded)
         let src = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
@@ -1811,6 +1827,7 @@ impl Pool {
                 ranges = keep;
             }
         }
+        self.bind_written(g, sub, &ranges);
         let mut back = Vec::new();
         for &(ra, rn) in &ranges {
             if super::upskip::on() {
@@ -4132,6 +4149,7 @@ pub fn begin_submit_ex(
         }
         if p.buf.is_some() && (p.placement == Placement::Mirror || p.placement == Placement::Vram) {
             let mut deferred_now = false;
+            p.bind_written(g, sub, &ranges);
             // pages left out as a lazy write-back's return, unchanged by the CPU since (`upskip::brought_back`)
             let mut back = Vec::new();
             for &(a, n) in &ranges {

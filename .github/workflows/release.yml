@@ -87,6 +87,8 @@ jobs:
             $line = $out | Where-Object { $_ -match "^(ok  |FAIL) $what" }
             if (-not $line -or $line -notmatch '^ok' -or $line -notlike "*$dist*") { throw "doctor: $what is not the release's own: $line" }
           }
+          # the doctor's own exit code counts the runner's Vulkan and keys failures; only the lines above decide
+          exit 0
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\nxrs -DestinationPath nxrs-windows-x64.zip
