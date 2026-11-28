@@ -418,10 +418,7 @@ thread_local! {
 /// ~57 MB a frame of rewritten pages lie in many small ranges, OOT-DESC). As `par_hashes`' hashes, these only decide a
 /// skip: they are taken after the scan reset the pages' write watch, so a store made after the hash is found by the next
 /// scan. Kept until `prehash_clear`. `NXGFX_PREHASH=0`: off.
-///
-/// `ahead`: pages of this sync's scan already being hashed since it took them (`prehash_ahead`): finished here, and
-/// those pages not hashed again.
-pub fn prehash(pages: &[u64], ahead: Vec<PreAhead>) {
+pub fn prehash(pages: &[u64]) {
     if !on() || !prehash_on() || pages.is_empty() {
         return;
     }
@@ -429,37 +426,18 @@ pub fn prehash(pages: &[u64], ahead: Vec<PreAhead>) {
     let mut v: Vec<u64> = pages.to_vec();
     v.sort_unstable();
     v.dedup();
-    let mut known: Vec<(u64, u64)> = Vec::new();
-    for mut a in ahead {
-        known.extend(a.finish());
-    }
-    if !known.is_empty() {
-        known.sort_unstable_by_key(|e| e.0);
-        known.dedup_by_key(|e| e.0);
-        AHEAD_PAGES.fetch_add(known.len() as u64, Ordering::Relaxed);
-        v.retain(|pg| known.binary_search_by_key(pg, |e| e.0).is_err());
-    }
     let out: Vec<AtomicU64> = (0..v.len()).map(|_| AtomicU64::new(0)).collect();
-    if !v.is_empty() {
-        par_for(v.len(), &|k| {
-            // SAFETY: a whole page a scan of a registered pool's committed guest memory reported written (as `par_hashes`)
-            let h = page_hash(unsafe { core::slice::from_raw_parts(v[k] as *const u8, PAGE as usize) });
-            out[k].store(h, Ordering::Relaxed);
-        });
-    }
+    par_for(v.len(), &|k| {
+        // SAFETY: a whole page a scan of a registered pool's committed guest memory reported written (as `par_hashes`)
+        let h = page_hash(unsafe { core::slice::from_raw_parts(v[k] as *const u8, PAGE as usize) });
+        out[k].store(h, Ordering::Relaxed);
+    });
     PRE.with(|p| {
         let mut p = p.borrow_mut();
         p.clear();
         p.extend(v.iter().zip(out).map(|(&pg, h)| (pg, h.into_inner())));
-        if !known.is_empty() {
-            p.append(&mut known);
-            p.sort_unstable_by_key(|e| e.0);
-        }
     });
 }
-
-/// Pages hashed ahead, while the scan went on (`prehash_ahead`; the upload skip's report).
-static AHEAD_PAGES: AtomicU64 = AtomicU64::new(0);
 
 /// The end of the pool sync: `prehash`'s hashes are dropped (they describe the guest bytes at that sync only).
 pub fn prehash_clear() {
@@ -519,96 +497,21 @@ fn par_for(n: usize, f: &(dyn Fn(usize) + Sync)) {
         next: std::sync::atomic::AtomicUsize::new(0),
         done: std::sync::atomic::AtomicUsize::new(0),
     });
-    publish(&job);
+    hash_pool_start();
+    {
+        let mut j = HASH_JOB.lock().unwrap();
+        j.0 += 1;
+        j.1 = Some(job.clone());
+    }
+    HASH_CV.notify_all();
     job.run();
     while job.done.load(Ordering::Acquire) < n {
         std::hint::spin_loop();
     }
-    HASH_JOBS.lock().unwrap().retain(|x| !std::sync::Arc::ptr_eq(x, &job));
-}
-
-/// A job for the hash threads, behind the ones already waiting (the caller takes its pieces too, or waits).
-fn publish(job: &std::sync::Arc<ParJob>) {
-    hash_pool_start();
-    {
-        let mut q = HASH_JOBS.lock().unwrap();
-        // (jobs whose pieces are all taken: their callers finish them)
-        while q.front().is_some_and(|j| j.taken()) {
-            q.pop_front();
-        }
-        q.push_back(job.clone());
+    let mut j = HASH_JOB.lock().unwrap();
+    if j.1.as_ref().is_some_and(|x| std::sync::Arc::ptr_eq(x, &job)) {
+        j.1 = None;
     }
-    HASH_CV.notify_all();
-}
-
-/// (OOT-FPS2) Pages a pool sync's scan took from the write watch, hashed by the hash threads while the scan goes on
-/// (`prehash_ahead`): its write-watch calls (~1-1.5 ms a frame in OoT, system time) and the hashing of the ~57 MB a
-/// frame it finds rewritten (memory-bound, ~1.5 ms on the hash threads with the replay thread) overlapped instead of one
-/// after the other. Finished (the caller takes the pieces left and waits) by `prehash`, or when dropped.
-pub struct PreAhead {
-    pages: std::sync::Arc<Vec<u64>>,
-    out: std::sync::Arc<Vec<AtomicU64>>,
-    job: std::sync::Arc<ParJob>,
-    /// what the job calls; it stays until the job is done (`finish`)
-    _f: Box<dyn Fn(usize) + Sync + Send>,
-    done: bool,
-}
-
-impl PreAhead {
-    /// The job's pieces left taken here, its calls waited for: (page, hash) of each page.
-    fn finish(&mut self) -> Vec<(u64, u64)> {
-        if !self.done {
-            self.job.run();
-            while self.job.done.load(Ordering::Acquire) < self.job.n {
-                std::hint::spin_loop();
-            }
-            self.done = true;
-        }
-        self.pages.iter().zip(self.out.iter()).map(|(&p, h)| (p, h.load(Ordering::Relaxed))).collect()
-    }
-}
-
-impl Drop for PreAhead {
-    fn drop(&mut self) {
-        // no call of `_f` may outlive it
-        let _ = self.finish();
-    }
-}
-
-/// `NXGFX_PREHASH_AHEAD=0`: a scan's pages are hashed after it, all together (`prehash`), as before OOT-FPS2.
-fn ahead_on() -> bool {
-    if cfg!(test) {
-        return true;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_PREHASH_AHEAD").as_deref() != Ok("0"))
-}
-
-/// Whole pages the scan just took from the write watch (its reset made, so a hash of their bytes from now on decides a
-/// skip as `prehash`'s does) hashed on the hash threads from now; None when the upload skip, `prehash` or this is off.
-pub fn prehash_ahead(pages: Vec<u64>) -> Option<PreAhead> {
-    if !on() || !prehash_on() || !ahead_on() || pages.is_empty() {
-        return None;
-    }
-    let n = pages.len();
-    let pages = std::sync::Arc::new(pages);
-    let out: std::sync::Arc<Vec<AtomicU64>> = std::sync::Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
-    let (p2, o2) = (pages.clone(), out.clone());
-    let f: Box<dyn Fn(usize) + Sync + Send> = Box::new(move |k| {
-        // SAFETY: a whole page a scan of a registered pool's committed guest memory reported written (as `prehash`);
-        // the scanning sync holds the pool lock until it has finished this job
-        let h = page_hash(unsafe { core::slice::from_raw_parts(p2[k] as *const u8, PAGE as usize) });
-        o2[k].store(h, Ordering::Relaxed);
-    });
-    let fp: *const (dyn Fn(usize) + Sync + 'static) = &*f as &(dyn Fn(usize) + Sync + 'static);
-    let job = std::sync::Arc::new(ParJob {
-        f: fp,
-        n,
-        next: std::sync::atomic::AtomicUsize::new(0),
-        done: std::sync::atomic::AtomicUsize::new(0),
-    });
-    publish(&job);
-    Some(PreAhead { pages, out, job, _f: f, done: false })
 }
 
 struct ParJob {
@@ -625,10 +528,6 @@ unsafe impl Sync for ParJob {}
 const PAR_PIECE: usize = 64;
 
 impl ParJob {
-    /// Every piece taken (by a thread that calls it, or that finds none left).
-    fn taken(&self) -> bool {
-        self.next.load(Ordering::Acquire) >= self.n
-    }
     fn run(&self) {
         loop {
             let i = self.next.fetch_add(PAR_PIECE, Ordering::AcqRel);
@@ -646,10 +545,8 @@ impl ParJob {
     }
 }
 
-/// The jobs waiting for the hash threads, oldest first (a sync's scan starts several, `prehash_ahead`, OOT-FPS2: one
-/// job slot let a newer job take the threads off an older one, whose caller then hashed the rest alone).
-static HASH_JOBS: Mutex<std::collections::VecDeque<std::sync::Arc<ParJob>>> =
-    Mutex::new(std::collections::VecDeque::new());
+/// (job number, the job in progress)
+static HASH_JOB: Mutex<(u64, Option<std::sync::Arc<ParJob>>)> = Mutex::new((0, None));
 static HASH_CV: std::sync::Condvar = std::sync::Condvar::new();
 
 /// The `vk page hash` threads besides the caller: `NXGFX_HASH_THREADS`, default half the machine's threads, 2 to 12
@@ -667,21 +564,19 @@ fn hash_pool_start() {
     START.call_once(|| {
         let n = hash_threads();
         for _ in 0..n {
-            let _ = std::thread::Builder::new().name("vk page hash".into()).spawn(|| loop {
-                // the oldest job with pieces left (the ones all taken leave the queue)
-                let job = {
-                    let mut q = HASH_JOBS.lock().unwrap();
-                    loop {
-                        while q.front().is_some_and(|j| j.taken()) {
-                            q.pop_front();
+            let _ = std::thread::Builder::new().name("vk page hash".into()).spawn(|| {
+                let mut seen = 0u64;
+                loop {
+                    let job = {
+                        let mut j = HASH_JOB.lock().unwrap();
+                        while j.0 == seen || j.1.is_none() {
+                            j = HASH_CV.wait(j).unwrap();
                         }
-                        if let Some(j) = q.front() {
-                            break j.clone();
-                        }
-                        q = HASH_CV.wait(q).unwrap();
-                    }
-                };
-                job.run();
+                        seen = j.0;
+                        j.1.clone().unwrap()
+                    };
+                    job.run();
+                }
             });
         }
     });
@@ -1155,8 +1050,7 @@ pub fn report(frames: f64) -> String {
     let (hm, rm, pm) = (ms(&HASH_NS), ms(&REARM_NS), ms(&PRE_NS));
     let bk = BROUGHT_SKIPPED.swap(0, Ordering::Relaxed) as f64 / frames / 1024.0;
     let race = BROUGHT_RACED.swap(0, Ordering::Relaxed);
-    let ah = (AHEAD_PAGES.swap(0, Ordering::Relaxed) * PAGE) as f64 / frames / 1048576.0;
-    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged ({race} brought back while copied, upload dropped); copy and hash {hm:.2} ms, re-arming {rm:.2} ms under the pool lock and {pm:.2} ms before it; {ah:.2} MB hashed while the scans went on (NXGFX_PREHASH_AHEAD)")
+    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged ({race} brought back while copied, upload dropped); copy and hash {hm:.2} ms, re-arming {rm:.2} ms under the pool lock and {pm:.2} ms before it")
 }
 
 #[cfg(test)]
@@ -1626,45 +1520,17 @@ mod tests {
         drop_any(base);
         set(base, &vec![0x11; size as usize]);
         assert_eq!(runs(base, size, base, size), vec![(base, size)], "first upload");
-        prehash(&[base + PAGE, base, base + 2 * PAGE, base], Vec::new());
+        prehash(&[base + PAGE, base, base + 2 * PAGE, base]);
         assert_eq!(runs(base, size, base, size), vec![], "the same bytes, decided on the prehashes");
         // a page's prehash taken, then its bytes changed before the decision: decided on the prehash, as any hash
         // taken before it (the scan reset its write watch first, so the next scan finds the store)
-        prehash(&[base + PAGE], Vec::new());
+        prehash(&[base + PAGE]);
         set(base + PAGE, &[0x22; 8]);
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "decided on the prehash");
         prehash_clear();
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![(base + PAGE, PAGE)], "the next sync: its own hash");
         assert_eq!(PRE.with(|l| prehashed_at(&l.borrow(), &mut 0, base)), 0, "cleared");
         drop_any(base);
-    }
-
-    /// OOT-FPS2: pages hashed ahead while a scan goes on (`prehash_ahead`) give `prehash` the same hashes as hashing
-    /// them there, together with the pages it hashes itself; an ahead job dropped unfinished is finished first (its
-    /// closure outlives every call), and many jobs queued at once all complete.
-    #[test]
-    fn pages_hashed_ahead_are_the_pages_hashed_after() {
-        let _s = SERIAL.lock().unwrap();
-        let n = 40usize;
-        let mem: Vec<u8> = (0..n * PAGE as usize + PAGE as usize).map(|i| (i * 31 + i / 4096) as u8).collect();
-        let base = (mem.as_ptr() as u64 + PAGE - 1) & !(PAGE - 1);
-        let pages: Vec<u64> = (0..n as u64).map(|k| base + k * PAGE).collect();
-        let want: Vec<(u64, u64)> = pages
-            .iter()
-            .map(|&p| (p, page_hash(unsafe { core::slice::from_raw_parts(p as *const u8, PAGE as usize) })))
-            .collect();
-        // half ahead in several jobs, the rest (and a repeat of an ahead page) hashed by `prehash` itself
-        let ahead: Vec<PreAhead> =
-            pages[..20].chunks(3).filter_map(|c| prehash_ahead(c.to_vec())).collect();
-        assert_eq!(ahead.len(), 7);
-        prehash(&pages, ahead);
-        let got: Vec<(u64, u64)> = PRE.with(|l| l.borrow().clone());
-        assert_eq!(got, want);
-        prehash_clear();
-        // dropped without `prehash`: finished on the way out, every job of a full queue
-        let many: Vec<PreAhead> = (0..64).filter_map(|_| prehash_ahead(pages.clone())).collect();
-        drop(many);
-        assert!(HASH_JOBS.lock().unwrap().iter().all(|j| j.taken()));
     }
 
     /// OOT-FPS2: the walk along `prehash`'s list finds each page's hash for ascending pages, 0 for pages it lacks, and
