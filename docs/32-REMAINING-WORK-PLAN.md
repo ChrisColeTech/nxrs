@@ -263,6 +263,17 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       refused, GPU 230 ms. Code taken out. Not built: the GPU copying a hot pool into VRAM itself each submission (no
       CPU hashing, no PCIe reads per draw). Owner saw a fine grid on screen, not in any capture (open). Runs spend
       ~11 of 15 min on the opening: a save that starts Link in his house would cut that.
+- [x] **OOT-LOAD** (2026-11-28, merged; `docs/waves/OOT-LOAD.md`). Loading OoT's house autosave lost the device
+      (`20261128-083853-oot-saved-probe`): not descriptor indexing (an in-range offset, `-090152-diag1`) but an image
+      freed early (`-090743-diag2`). Chained submits (`chain_parked`) begin the next submission before submitting the
+      previous one, and one "recording" flag let the earlier submit take the next one's releases. Fix: `AfterUse` in
+      `vk/queue.rs` tags each release with the newest submission begun and a submit takes only those up to itself
+      and its children. Diagnostics kept: descriptor sources and buffers above the fault in the loss report, freed
+      images, a CPU set-offset check (red line). Scenarios `oot-saved` (standing [80, 155]) and `oot-saved-walk`
+      ([165, 233]), ~4 min, from `build/saves/oot-house` (local only). Five loads without loss; `oot-saved` 56.6 / 50.0
+      (`-094134-saved-r3`, 5/5 on route), walk 43.5 / 29.5 (`-092149-saved-walk-r2`); full `oot` 43.1 / 29.6
+      (`-092605-oot-regr`, on route; base 44.9 / 30, machine shared). The wave was rebased by the lead onto
+      `gameplay-harness` after the branch's 08:42 history rewrite (fast-import; content unchanged).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
