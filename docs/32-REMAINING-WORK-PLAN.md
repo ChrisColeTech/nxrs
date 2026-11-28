@@ -5,6 +5,25 @@
 [`31-DELEGATION-PROTOCOL.md`](31-DELEGATION-PROTOCOL.md). This file retains prior assignments, evidence and
 resource decisions, but it no longer defines product milestones. Source root: `D:\Projects\RecompLauncherEngine`.
 
+## 3DS port — 2026-11-27, opened (plan `docs/36-3DS-PORT-PLAN.md`, branch `gameplay-harness`)
+
+The owner directed a 3DS port plan: `.3ds`/`.cia` in, native + wasm out. The plan was written by wave 3DS-PLAN
+(`docs/36-3DS-PORT-PLAN.md`); the donor is `D:\Projects\3dsrecomp` pinned at `d143f2c51834bd89f32c0ac79465f1855d7d6f8e`
+(MIT). Waves branch from `gameplay-harness` as they open; the lead adds each wave's result here. Owner decisions
+D1–D7 (plan §10) run on their recorded recommendations until the owner says otherwise.
+
+| Wave | State | Scope | Exit evidence (plan §8) / lead result |
+|---|---|---|---|
+| 3DS-W0 Feasibility | open 2026-11-27 | vendor the donor front half into `src/translator3ds`, synthetic fixtures, clang + emcc compile of the generated C | `translator3ds` builds; `cargo test -p translator3ds` green; C compiles to a static lib and a wasm object; no Switch crate touched |
+| 3DS-W1 Input | pending W0 | `.3ds`/`.cia` accepted end to end (translate-only), SMDH control, launcher import | build stages programs + `romfs/` + `control.smdh` + `romfs.source`; launcher import with card art; launcher tests |
+| 3DS-W2 Guest host | pending W1 | `runtime3ds`: run loop, dispatch, page-table memory, threads, ARM11/Thumb/VFP interpreter, svc dispatch | title entry + first threads run headless; interpreter differential 0 mismatches on the tested classes |
+| 3DS-W3 Services | pending W2 | `os3ds`: srv/apt/fs/hid/cfg/ptm/ldr::ro | title reaches its menu, input moves it (sheets read); gaps summary |
+| 3DS-W4 Graphics (native) | pending W3 | `gpu3ds`: GX command lists, VS/GS+TEV → SPIR-V, Vulkan executor, `front::ds` | first correct pixels: menu drawn, both screens presented (sheets read) |
+| 3DS-W5 Audio + the rest | pending W4 | dsp into the media sink, y2r/soc | audio audible, underruns counted; first controllable gameplay, native |
+| 3DS-W6 Pipeline polish | pending W5 | `profile.rs` 3DS table, per-title overrides, doctor line | second title builds and plays native; contract unchanged |
+| 3DS-W7 Web | pending W6 | wasm arms of runtime3ds/os3ds/gpu3ds, page two-screen layout + touch, WGSL shaders | title's menu and gameplay run in Chrome |
+| 3DS-W8 Validation + verify lane | pending W7 | library validation columns; recompiled-vs-interpreter differential as a build-time check | results named per title, failures listed |
+
 ## Current — 2026-11-24, gameplay harness reset (branch `gameplay-harness`)
 
 The owner removed the incident scaffolding: HWiNFO/thermal monitoring, the build supervisor and provenance, GPU
