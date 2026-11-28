@@ -70,6 +70,8 @@ pub struct Pool {
     pub tracked: bool,
     /// the frame a write-back last landed on it (a pool the GPU writes is not sealed)
     pub wb_frame: u64,
+    /// (OOT-HOST) its recent CPU writes and write-backs: a Mirror both write on most frames is imported (`hot`)
+    pub heat: super::hot::Heat,
     /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
     /// windows side by side over it: window k holds pool bytes [k * win, (k + 1) *
     /// win), window 0 is `buf`, the others are here. `win` 0: one buffer for all of it.
@@ -825,6 +827,7 @@ pub fn pool_add(p: &pool_t) {
         seal_entry: false,
         tracked: false,
         wb_frame: 0,
+        heat: Default::default(),
         win: 0,
         wins: Vec::new(),
         wins_da: Vec::new(),
@@ -1464,6 +1467,56 @@ impl Pool {
                 self.snapshot = Some(guest_bytes(self.base, self.size).into_owned());
             }
         }
+        self.note_address(g);
+        Ok(())
+    }
+
+    /// (OOT-HOST, `hot`) A mirror with a buffer becomes imported host memory: the GPU reads and writes the guest's
+    /// pages from now on. Under the pool lock, at a sync, with none of its write-backs in flight (every GPU write into
+    /// the mirror has landed, so guest memory holds the GPU's bytes). Pages held on the device (lazy write-back) come
+    /// back first; the old buffers are freed after their last use; the pool's buffer, address and windows change with
+    /// `POOL_GEN` (resolve caches, descriptor sets and the raw global memory table take the new ones). Refused: the pool
+    /// stays the mirror it was (nothing of it was changed but the device-held pages brought back).
+    fn to_host(&mut self, g: &Gpu) -> Result<(), String> {
+        if self.placement != Placement::Mirror || self.buf.is_none() || self.win != 0 {
+            return Err("not a one-buffer mirror".into());
+        }
+        // an imported page must hold the guest's current bytes and be accessible
+        super::lazy::touch(self.base, self.size);
+        let (lo, hi) = page_range(self.base, self.size);
+        if self.seal_entry {
+            super::seal::remove(lo, hi);
+            self.seal_entry = false;
+            self.sealed = false;
+            self.tracked = false;
+            SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+        }
+        let (b, off) = import(g, self.base, self.size)?;
+        let old = self.buf.replace(b);
+        self.buf_off = off;
+        self.placement = Placement::Host;
+        self.snapshot = None;
+        if let Some(o) = &old {
+            if let Some(m) = ADDRS.write().unwrap().as_mut() {
+                m.remove(&vk::Handle::as_raw(o.buf));
+            }
+            super::lost::ring::note_free(2, o.addr, o.size, vk::Handle::as_raw(o.buf), g.q.last_fence());
+        }
+        if let Some(gr) = self.gran.take() {
+            let mems: Vec<_> = gr.mem.into_iter().flatten().collect();
+            GRAN_BOUND.fetch_sub(mems.len() as u64 * gr.size, Ordering::Relaxed);
+            g.q.defer_after_use(Box::new(move |g: &Gpu| {
+                let mut a = g.alloc.lock().unwrap();
+                for m in mems {
+                    let _ = a.free(m);
+                }
+            }));
+        }
+        if let Some(o) = old {
+            g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(o)));
+        }
+        // nothing is known of a GPU copy any more (the GPU's copy is guest memory)
+        super::upskip::drop_pool(self.base, self.base + self.size);
         self.note_address(g);
         Ok(())
     }
@@ -4082,7 +4135,7 @@ pub fn begin_submit_ex(
     // (OOT-DESC): the scan's pages and the pages the pools hold pending (most of OoT's arrive through the pool walker's
     // walks, drained into `pending`, with no scan of the sync's own)
     if super::upskip::on() {
-        let mut pages: Vec<u64> = taken.values().flatten().copied().collect();
+        let mut pages = mirror_pages(&m, &taken);
         let mut pend = |p: &Pool| {
             if p.buf.is_some() && p.placement == Placement::Mirror {
                 for &(a, n) in &p.pending {
@@ -4117,6 +4170,9 @@ pub fn begin_submit_ex(
     } else {
         Vec::new()
     };
+    let hot_rule = super::hot::rule();
+    // pools imported by this sync (their buffer textures are requeued once the pool lock is let go)
+    let mut switched: Vec<(u64, u64)> = Vec::new();
     let Pools { by_base, busy: busy_set, .. } = &mut *m;
     let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
@@ -4170,8 +4226,22 @@ pub fn begin_submit_ex(
             ranges.sort_unstable();
             ranges.dedup();
         }
-        // pieces under a write-back still in flight wait (in `pending`) until it has landed
-        if wb_guard() {
+        // (OOT-HOST) a mirror the CPU and the GPU write on most frames is imported now (`hot`): these ranges then need
+        // no upload, only the texture check
+        if p.placement == Placement::Mirror {
+            if let Some(r) = hot_rule {
+                let b: u64 = ranges.iter().map(|r| r.1).sum();
+                if b > 0 {
+                    p.heat.note_cpu(frame, b, &r);
+                }
+                if p.buf.is_some() && p.heat.hot(frame, p.size, max_buffer(g), &r) {
+                    try_hot(g, p, frame, &mut switched);
+                }
+            }
+        }
+        // pieces under a write-back still in flight wait (in `pending`) until it has landed (an imported pool has no
+        // write-back: the GPU writes guest memory itself)
+        if wb_guard() && p.placement != Placement::Host {
             let inflight = INFLIGHT.lock().unwrap();
             if !inflight.by_start.is_empty() && !ranges.is_empty() {
                 let mine = inflight.overlapping(p.base, p.base + p.size);
@@ -4290,7 +4360,58 @@ pub fn begin_submit_ex(
             }
         }
     }
+    if !switched.is_empty() {
+        // texel buffer views over an imported pool name its new buffer (as for a pool made over the same memory)
+        drop(_watch);
+        drop(m);
+        for (a, n) in switched {
+            g.tables.requeue_buf_texs(a, a + n);
+        }
+    }
     all
+}
+
+/// The pages a scan took that the sync may upload, for `upskip::prehash`: a mirror's only. (OOT-HOST) An imported
+/// pool's CPU writes are never uploaded, so never hashed (they were: OoT's per-frame pools under `NXGFX_POOL=host`).
+fn mirror_pages(m: &Pools, taken: &HashMap<u64, Vec<u64>>) -> Vec<u64> {
+    taken
+        .iter()
+        .filter(|(b, _)| m.by_base.get(b).is_some_and(|p| p.placement == Placement::Mirror))
+        .flat_map(|(_, v)| v.iter().copied())
+        .collect()
+}
+
+/// (OOT-HOST) Imports the hot mirror `p` (`Pool::to_host`) unless a write-back of it is in flight (then a later sync
+/// tries again); a pool is tried once, made or refused.
+fn try_hot(g: &Gpu, p: &mut Pool, frame: u64, switched: &mut Vec<(u64, u64)>) {
+    if !INFLIGHT.lock().unwrap().overlapping(p.base, p.base + p.size).is_empty() {
+        super::hot::WAITED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    p.heat.tried = true;
+    let (c, w) = p.heat.counts(frame);
+    match p.to_host(g) {
+        Ok(()) => {
+            super::hot::SWITCHED.fetch_add(1, Ordering::Relaxed);
+            super::hot::SWITCHED_B.fetch_add(p.size, Ordering::Relaxed);
+            switched.push((p.base, p.size));
+            crate::vklog!(
+                "hot pool {:#x} (+{:#x}, flags {:#x}) imported at frame {frame}: the CPU wrote it in {c} and write-backs landed in {w} of the last 64 frames",
+                p.base,
+                p.size,
+                p.flags
+            );
+        }
+        Err(e) => {
+            super::hot::REFUSED.fetch_add(1, Ordering::Relaxed);
+            crate::vklog!(
+                "hot pool {:#x} (+{:#x}, flags {:#x}): import refused ({e}); it stays mirrored",
+                p.base,
+                p.size,
+                p.flags
+            );
+        }
+    }
 }
 
 /// The GPU writes [a, a + n) in this submission: a mirrored range is copied back into guest memory at its fence.
@@ -4582,6 +4703,7 @@ pub fn apply_writebacks(
         // the GPU writes it: unsealed whole before its bytes land (lazy write-back owns its held pages' protection, and a
         // landing's stores are no CPU writes), and not sealed again while write-backs keep coming
         p.wb_frame = super::present::frames();
+        p.heat.note_wb(p.wb_frame);
         if p.seal_entry {
             let (lo, hi) = page_range(p.base, p.size);
             super::seal::remove(lo, hi);
@@ -4986,6 +5108,7 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
         + &super::wbdiff::report(f)
+        + &super::hot::summary()
         + &web_summary(f)
         + &format!(
             "; CPU flushes queued instead of waiting for the pool lock: {:.1} a frame",
@@ -5249,6 +5372,7 @@ mod seal_tests {
             seal_entry: false,
             tracked: false,
             wb_frame: 0,
+            heat: Default::default(),
             win: 0,
             wins: Vec::new(),
             wins_da: Vec::new(),
@@ -5268,6 +5392,25 @@ mod seal_tests {
             m.by_base.insert(b, pool(b, n));
         }
         m
+    }
+
+    /// (OOT-HOST) The sync hashes ahead only a mirror's written pages: an imported pool's are never uploaded.
+    #[test]
+    fn only_mirrors_pages_are_hashed_ahead() {
+        let mut m = pools(&[(0x10000, 0x4000), (0x20000, 0x4000), (0x30000, 0x4000)]);
+        m.by_base.get_mut(&0x20000).unwrap().placement = Placement::Host;
+        m.by_base.get_mut(&0x30000).unwrap().placement = Placement::Vram;
+        let taken: HashMap<u64, Vec<u64>> = [
+            (0x10000, vec![0x10000, 0x12000]),
+            (0x20000, vec![0x20000, 0x21000]),
+            (0x30000, vec![0x30000]),
+            (0x40000, vec![0x40000]),
+        ]
+        .into_iter()
+        .collect();
+        let mut p = mirror_pages(&m, &taken);
+        p.sort_unstable();
+        assert_eq!(p, vec![0x10000, 0x12000]);
     }
 
     /// OOT-WAIT: a CPU flush queued while the pool lock was held becomes its pool's pending upload (and the pool busy)

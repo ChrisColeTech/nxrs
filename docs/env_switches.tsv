@@ -63,6 +63,12 @@ NXGFX_GPU_DESWIZZLE	switch	`MIN_BYTES` whose rows are whole 32-bit words. `NXGFX
 NXGFX_HANDLE_TABLES	switch	NXGFX_HANDLE_TABLES=0: shaders with handle-table texture arrays are refused as before.	src/graphics/src/vk/shader.rs
 NXGFX_HEADLESS	test	set: no window (headless rendering; the OS layer skips the front end's window and its dialogs)	src/os/src/nvn/mod.rs, src/os/src/services/notice.rs, src/os/src/services/swkbd.rs
 NXGFX_HOST_MB	switch	memory, NXGFX_HOST_MB (0 = no cap); over it the allocation is refused and its caller's fallback applies	src/graphics/src/vk/mod.rs
+NXGFX_HOST_HOT	switch	`NXGFX_HOST_HOT=0`: no mirrored pool is switched to imported host memory; by default a Mirror the CPU and the GPU both write on most frames (OOT-HOST) is imported at a sync with none of its write-backs in flight	src/graphics/src/vk/hot.rs, src/graphics/src/vk/mem.rs
+NXGFX_HOST_HOT_FRAMES	switch	frames of the last 64 with at least `NXGFX_HOST_HOT_CPU_KB` of CPU writes a hot pool needs (32)	src/graphics/src/vk/hot.rs
+NXGFX_HOST_HOT_WB_FRAMES	switch	frames of the last 64 with a write-back landed a hot pool needs (16; 0: not asked)	src/graphics/src/vk/hot.rs
+NXGFX_HOST_HOT_CPU_KB	switch	CPU-written KB in one frame that count the frame for `NXGFX_HOST_HOT_FRAMES` (256)	src/graphics/src/vk/hot.rs
+NXGFX_HOST_HOT_MIN_KB	switch	smallest pool a hot switch imports, KB (1024: per-draw constant pools stay mirrored)	src/graphics/src/vk/hot.rs
+NXGFX_HOST_HOT_MAX_MB	switch	largest pool a hot switch imports, MB (256; never more than the device's largest buffer)	src/graphics/src/vk/hot.rs
 NXGFX_IMAGE_NOFLAG	switch	no storage use and the writes were lost. With `NXGFX_IMAGE_NOFLAG=1` (or the ini / `--image_noflag=1`; off by	src/graphics/src/lib.rs, src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
 NXGFX_IMG_DUE	switch	MKW-SETS: a submission looks for the images due for initialization or upload among kept candidates (made or CPU-written since, found due and not yet prepared), the images the CPU writes overlap now and the sparse ones, instead of walking every image. Default on; `0`: the walk over every image, as before	src/graphics/src/vk/image.rs
 NXGFX_IMG_FORMAT	switch	`0` leaves storage image views in the texture's format instead of the format the shader declares	src/graphics/src/vk/exec.rs
