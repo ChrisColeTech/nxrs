@@ -1,0 +1,13 @@
+[package]
+name = "translator3ds"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: 3DS package input and the ARM11/Thumb -> C translator (vendored from fearkov/3dsrecomp at d143f2c5, MIT)"
+
+[lib]
+path = "src/lib.rs"
+
+# the donor gates its verify lane's bits on this feature (cro.rs); the lane itself is 3DS-W8
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("verify"))'] }
