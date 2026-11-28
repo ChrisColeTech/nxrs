@@ -169,6 +169,15 @@ impl Memory {
         unsafe { (*self.tables.get()).write[page as usize] }
     }
 
+    /// the tables themselves, for a Context's pointers (the fills stay this host's business)
+    pub fn read_table(&self) -> *const *mut u8 {
+        unsafe { (*self.tables.get()).read.as_ptr() }
+    }
+
+    pub fn write_table(&self) -> *const *mut u8 {
+        unsafe { (*self.tables.get()).write.as_ptr() }
+    }
+
     /// maps a region; the pages stay uncommitted until first touched (lazy commit)
     /// overlaps are refused: a map over a live mapping is a kernel error, not a shadow
     pub fn map(&self, base: u32, size: u32, perm: Perm, state: State, kind: Kind) -> Result<(), String> {

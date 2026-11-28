@@ -261,7 +261,7 @@ fn extension(ctx: &mut Context, address: u32, opcode: u32, double: bool, rd: usi
         // vmov, vabs, vneg and vsqrt: moves and sign ops leave bits untouched, doubles included
         (0b0000 | 0b0001, _) => {
             let second = vn & 1 != 0;
-            let op = 9 + (second as u32) << 1 | top as u32;
+            let op = 9 + ((second as u32) << 1 | top as u32);
             if double {
                 if op == 12 {
                     let value = get_d(ctx, rm).sqrt();
