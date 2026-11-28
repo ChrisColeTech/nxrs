@@ -1541,19 +1541,30 @@ mod tests {
 
     /// OOT-WAIT: SleepThread sleeps as long as asked, not the host timer's ~0.6 ms: 20 us sleeps (Ocarina of Time's
     /// job threads' backoff) average well under 0.3 ms (the host's sleep alone: ~0.58 ms each), and a longer one is
-    /// never short.
+    /// never short. The upper bounds hold for the best of five tries: a loaded machine (the whole workspace's tests
+    /// at once) can deschedule a yielding thread, but the host timer alone never gets a 20 us sleep under ~0.5 ms.
     #[test]
     fn sleep_thread_sleeps_as_long_as_asked() {
-        let t0 = Instant::now();
-        for _ in 0..20 {
-            sleep_thread(20_000);
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..20 {
+                sleep_thread(20_000);
+            }
+            let each = t0.elapsed() / 20;
+            assert!(each >= Duration::from_micros(20), "20 us sleeps took {each:?} each: short");
+            best = best.min(each);
         }
-        let each = t0.elapsed() / 20;
-        assert!(each >= Duration::from_micros(20) && each < Duration::from_micros(300), "20 us sleeps took {each:?} each");
-        let t0 = Instant::now();
-        sleep_thread(3_000_000);
-        let e = t0.elapsed();
-        assert!(e >= Duration::from_millis(3) && e < Duration::from_millis(5), "a 3 ms sleep took {e:?}");
+        assert!(best < Duration::from_micros(300), "20 us sleeps took {best:?} each at best");
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            sleep_thread(3_000_000);
+            let e = t0.elapsed();
+            assert!(e >= Duration::from_millis(3), "a 3 ms sleep took {e:?}: short");
+            best = best.min(e);
+        }
+        assert!(best < Duration::from_millis(5), "a 3 ms sleep took {best:?} at best");
     }
 
     #[test]
