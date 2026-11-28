@@ -236,7 +236,15 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       (`20261128-010456-wait-base`) -> 47.1 / 30.0 of 59 (`20261128-014336-wait-fix1`, on route, sheets read by the
       lead); house 44.4 / 41.0 (`-015941-wait-house`). Open: replay thread ~17 ms (pool-lock waits behind the
       completion thread's landings, ~3 ms); peak 30.7 GB near the 32 GB cap; yield cost on host CPU; the sleep
-      change is global (other titles need a regression run).
+      change is global (other titles need a regression run). Lead's MK8D regression after merge: 59.9 / 59.0
+      (`20261128-022358-mk8d`, sheets correct).
+- [ ] **OOT-LOCK** (2026-11-28, code NOT merged; doc `docs/waves/OOT-LOCK.md`, code on branch `ootlock` `4641f8b`).
+      Landings-first by the waited fence (`NXGFX_LAND_FIRST`) cut the main thread's `nvnSyncWait` 272 -> 152 ms/s
+      but the time moved into waiting for replay-queue room (44 -> 124 ms/s); frame ms at equal draws within +-1 ms;
+      `oot` 50.0 / 39.0 (`20261128-024046-lock-base`) -> 46.9 / 30.0 (`-040748-lock-after`). Moved nothing visible,
+      so the lead left it out (docs/31 §4). Memory: textures made and destroyed, not leaked; peak 28.2-29.2 GB.
+      Next cut: the replay thread's own ~18-19.5 ms (translation ~5.4, pool sync ~7.4: page hashing ~2.9, write
+      watch 1.2, landing waits ~2); a fixed-camera window to make runs comparable (noise ~+-1 ms).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
