@@ -228,6 +228,15 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       hashing, scan-time hashing and lazy-image waits were built, moved nothing, removed. Open: the game's own frame
       takes ~1.3 vsyncs (main thread 90% idle, blocked on other guest threads: next, profile what those wait on);
       opening's held-back writes 16 -> 138 MB on one line (pictures correct); Fault A (14 in `-002206-fps2-final-house`).
+- [~] **OOT-WAIT** (2026-11-28, merged; `docs/waves/OOT-WAIT.md`). Wait accounting (`NXRS_WAIT_ACCT=1`) found the
+      main thread waiting 12.1 ms a frame on job threads that were 10-15 % busy: guest 20 us sleeps took ~0.58 ms on
+      the Windows timer, and CPU flushes waited up to 5 ms for the pool lock. Fixes: SleepThread lasts as asked (host
+      sleep then yield for the last `NXRS_SLEEP_SPIN_US`=1000 us); flushes queued when the pool lock is held
+      (`NXGFX_FLUSH_QUEUE`), taken at the next lock before pending ranges are read. `oot` 845-915 s: 29.7 / 27.0
+      (`20261128-010456-wait-base`) -> 47.1 / 30.0 of 59 (`20261128-014336-wait-fix1`, on route, sheets read by the
+      lead); house 44.4 / 41.0 (`-015941-wait-house`). Open: replay thread ~17 ms (pool-lock waits behind the
+      completion thread's landings, ~3 ms); peak 30.7 GB near the 32 GB cap; yield cost on host CPU; the sleep
+      change is global (other titles need a regression run).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
