@@ -33,7 +33,11 @@ pub fn open(path: impl AsRef<Path>) -> Result<Game3ds, Error> {
     let path = path.as_ref();
     let blob = Blob::open(path)?;
     let mut kind = kind_of(&blob.read_at(0, 0x200)?)?;
-    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")) && kind == DsKind::Cxi {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        && kind == DsKind::Cxi
+    {
         kind = DsKind::App;
     }
     let title = Title::open(blob)?;
@@ -47,12 +51,17 @@ pub fn open(path: impl AsRef<Path>) -> Result<Game3ds, Error> {
 /// the container kind by magic: NCSD at 0x100, NCCH at 0x100, or a CIA header size at 0
 /// a .cxi and a bare .app are the same bytes; the caller names the App kind from the extension
 pub fn kind_of(start: &[u8]) -> Result<DsKind, Error> {
-    let magic = |offset: usize, word: &[u8; 4]| start.get(offset..offset + 4).is_some_and(|got| got == word);
+    let magic = |offset: usize, word: &[u8; 4]| {
+        start.get(offset..offset + 4).is_some_and(|got| got == word)
+    };
     if magic(0x100, b"NCSD") {
         Ok(DsKind::Cart)
     } else if magic(0x100, b"NCCH") {
         Ok(DsKind::Cxi)
-    } else if start.first_chunk::<4>().is_some_and(|got| u32::from_le_bytes(*got) == rom::CIA_HEADER_SIZE) {
+    } else if start
+        .first_chunk::<4>()
+        .is_some_and(|got| u32::from_le_bytes(*got) == rom::CIA_HEADER_SIZE)
+    {
         Ok(DsKind::Cia)
     } else {
         rom::error("not a 3DS cartridge image, .cia or executable")
@@ -78,7 +87,7 @@ mod tests {
         // a cart: 0x100 of lead-in, NCSD at 0x100, the fixture as partition 0 at 0x600
         let mut cart = vec![0; 0x600];
         cart[0x100..0x104].copy_from_slice(b"NCSD");
-        cart[0x120..0x124].copy_from_slice(&((0x600u32 / 0x200)).to_le_bytes());
+        cart[0x120..0x124].copy_from_slice(&(0x600u32 / 0x200).to_le_bytes());
         cart.extend_from_slice(&bytes);
         assert_eq!(kind_of(&cart).unwrap(), DsKind::Cart);
         let opened = open(&path).unwrap();
@@ -97,7 +106,10 @@ mod tests {
         std::fs::remove_file(app_path).unwrap();
 
         // nothing recognizable is refused with the container line
-        assert_eq!(kind_of(&[0u8; 0x200]).unwrap_err().to_string(), "not a 3DS cartridge image, .cia or executable");
+        assert_eq!(
+            kind_of(&[0u8; 0x200]).unwrap_err().to_string(),
+            "not a 3DS cartridge image, .cia or executable"
+        );
     }
 
     /// a .cia whose content 0 is plain carries the exe, an encrypted one is refused the donor's way
@@ -105,7 +117,10 @@ mod tests {
     fn a_cia_opens_through_its_content_record() {
         let code = words(&[0xE1A0_0000, 0xE12F_FF1E]);
         let bytes = cia(&code, false);
-        let path = std::env::temp_dir().join(format!("translator3ds-kinds-cia-{}.cia", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "translator3ds-kinds-cia-{}.cia",
+            std::process::id()
+        ));
         std::fs::write(&path, &bytes).unwrap();
         let opened = open(&path).unwrap();
         assert_eq!(opened.kind, DsKind::Cia);
@@ -117,7 +132,10 @@ mod tests {
         let Err(message) = open(&path) else {
             panic!("an encrypted .cia opened");
         };
-        assert_eq!(message.to_string(), "the .cia is encrypted, it has to be decrypted first");
+        assert_eq!(
+            message.to_string(),
+            "the .cia is encrypted, it has to be decrypted first"
+        );
         std::fs::remove_file(path).unwrap();
     }
 

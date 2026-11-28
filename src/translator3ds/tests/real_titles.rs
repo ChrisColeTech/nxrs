@@ -15,7 +15,12 @@ fn a_real_title_reads_and_translates() {
     let programs = translator3ds::programs(&opened.title, Mods::default()).unwrap();
     for (name, program) in &programs {
         let analysis = translator3ds::discover::analyze(program);
-        println!("{name}: {} bytes of text, {} functions, {} svc sites", program.text.bytes.len(), analysis.functions.len(), analysis.svc_sites);
+        println!(
+            "{name}: {} bytes of text, {} functions, {} svc sites",
+            program.text.bytes.len(),
+            analysis.functions.len(),
+            analysis.svc_sites
+        );
         assert!(!analysis.functions.is_empty(), "{name}: no functions found");
     }
     assert!(programs.iter().any(|(name, _)| name == "executable"));

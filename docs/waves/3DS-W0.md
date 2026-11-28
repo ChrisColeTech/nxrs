@@ -111,4 +111,25 @@ pretends to.
 
 ## Outcome
 
-(filled in when the wave closes)
+**Done, on branch `3DS-W0`.** The crate builds, 77 tests pass (`cargo test -p translator3ds`: 70 lib + 6
+synthetic + 1 doc-test), the synthetic fixture's C compiles with clang 21.1.8 (cc.rs's discovery lands on
+`C:\Program Files\LLVM\bin\clang.exe`) into `translator3ds_w0.a` (4508 bytes), and the same C compiles through
+emcc 7.0.1 into two `\0asm` wasm objects (invocations, sizes and SHA-256s under `build/DS/W0/`). The workspace
+default suite is green (`cargo test --workspace --exclude renhdrum`: 13.6 s warm; without translator3ds 11.7 s —
+the crate adds ~2 s, its compile lanes are env-gated off by default).
+
+Deviations that grew while working, on top of the list above:
+
+12. rom.rs's test fixture `rom()` split into `rom()` + `rom_bytes()` so title.rs's .cia fixture can wrap the
+    .cxi bytes in a container; its `error()` and `CIA_HEADER_SIZE` are `pub(crate)` for the same reason.
+13. hints.rs's `apply_hints(extra, programs, analyses)` took the program id parameter out again — the bundled
+    list it would feed is not vendored, so a parameter the body ignores is worse than its absence (the donor's
+    `hinted.extend(bundled(...))` line returns in W2 with the real list).
+14. tests/synthetic.rs's compile test points `AR` at llvm-ar beside the discovered clang (no `ar` on PATH on
+    Windows; the donor never archived on Windows), and `NXRS_3DS_CC_KEEP` keeps the gen dir for the standalone
+    evidence runs.
+
+Found, reported, not fixed (pre-existing at base `a25c3c3`, verified by reverting the member line): the root
+`cargo test` builds `renhdrum`'s test target (cargo keeps the excluded path dep in the member set) and that
+target cannot link on Windows — its own Cargo.toml documents it ("upstream's unit tests call Opus directly, and
+with no build script nothing links libopus into a renhdrum test"). The Switch crates' suites are all green.
