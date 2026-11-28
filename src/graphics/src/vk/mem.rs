@@ -3878,6 +3878,8 @@ pub fn begin_submit_ex(
         POOL_GEN.fetch_add(1, Ordering::AcqRel);
     }
     let mut all = Vec::new();
+    // this sync's scan pages being hashed ahead (`upskip::prehash_ahead`); finished by `prehash` below, or when dropped
+    let mut ahead: Vec<super::upskip::PreAhead> = Vec::new();
     // the write watch asked once per run of watched pools whose pages touch (Pokemon Legends Z-A has ~400 mirrors,
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -4000,10 +4002,18 @@ pub fn begin_submit_ex(
         // instead of one per pool: Donkey Kong Bananza has ~1,300 mirrors, 9 submissions a frame)
         let mut i = 0;
         let mut dirty_pages = Vec::new();
+        // (OOT-FPS2) the pages taken so far, hashed on the hash threads from each `AHEAD` of them while the scan goes
+        // on (`upskip::prehash_ahead`): its write-watch calls and the hashing overlap
+        const AHEAD: usize = 256;
+        let mut ahead_from = 0;
         while i < watched.len() {
             let (j, hi) = watch_batch_end(&watched, i);
             if let Some(pages) = watch::take(watched[i].1, hi, true) {
                 dirty_pages.extend(pages);
+                if dirty_pages.len() - ahead_from >= AHEAD {
+                    ahead.extend(super::upskip::prehash_ahead(dirty_pages[ahead_from..].to_vec()));
+                    ahead_from = dirty_pages.len();
+                }
                 for &(base, _, _, _) in &watched[i..j] {
                     taken.entry(base).or_default();
                 }
@@ -4061,7 +4071,7 @@ pub fn begin_submit_ex(
         } else {
             m.by_base.values().for_each(&mut pend);
         }
-        super::upskip::prehash(&pages);
+        super::upskip::prehash(&pages, std::mem::take(&mut ahead));
     }
     // (MKW-SYNC, `sync_lean`) the pools a scan found written or could not read, for the per-pool pass below
     let scan_keys: Vec<u64> = if !covered && sync_lean() {
