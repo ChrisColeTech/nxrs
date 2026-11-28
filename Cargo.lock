@@ -2077,6 +2077,7 @@ dependencies = [
 name = "runtime3ds"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "translator3ds",
  "windows-sys 0.61.2",
 ]

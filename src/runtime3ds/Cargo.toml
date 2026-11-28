@@ -26,3 +26,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

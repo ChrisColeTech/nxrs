@@ -314,6 +314,8 @@ int main(void) {
             .args(["-w", "-o"])
             .arg(&exe)
             .arg(dir.join("layout.c"))
+            // the header's VFP helpers call sqrt: libm is its own library on unix
+            .args(if cfg!(unix) { &["-lm"][..] } else { &[] })
             .status()
             .is_ok_and(|s| s.success());
         assert!(built, "the layout probe did not compile");
@@ -449,8 +451,12 @@ int main(void) {
     /// the stack limit leaves STACK bytes below the caller's frame
     #[test]
     fn the_stack_limit_stays_below_here() {
-        let here = &0u8 as *const u8 as usize;
-        assert!(stack_limit() < here);
-        assert!(here - stack_limit() >= STACK);
+        // a local, on this frame (`&0u8` is a promoted static: read-only data, above the stack on Linux)
+        let local = 0u8;
+        let here = core::ptr::addr_of!(local) as usize;
+        let limit = stack_limit();
+        assert!(limit < here);
+        // STACK bytes below this frame, give or take the frame itself
+        assert!(here.abs_diff(limit + STACK) < 4096, "{here:#x} {limit:#x}");
     }
 }

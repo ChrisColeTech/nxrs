@@ -491,10 +491,20 @@ fn windows_alloc(bytes: usize) -> Option<*mut u8> {
         };
         (!at.is_null()).then_some(at as *mut u8)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let layout = std::alloc::Layout::from_size_align(bytes, 0x10000).ok()?;
-        Some(unsafe { std::alloc::alloc_zeroed(layout) })
+        // safe: a fresh anonymous mapping, PROT_NONE and no commit charge, nothing readable until committed
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        (at != libc::MAP_FAILED).then_some(at as *mut u8)
     }
 }
 
@@ -513,10 +523,11 @@ fn windows_commit(at: *mut u8, bytes: usize) -> Option<*mut u8> {
         };
         (!got.is_null()).then_some(got as *mut u8)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = (at, bytes);
-        Some(at)
+        // safe: at is inside our reservation; its pages read as zero until written
+        let ok = unsafe { libc::mprotect(at as *mut _, bytes, libc::PROT_READ | libc::PROT_WRITE) } == 0;
+        ok.then_some(at)
     }
 }
 
