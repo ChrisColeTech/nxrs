@@ -10,6 +10,9 @@
 //! Contract v2 (subcommands; `--machine` adds `@progress` / `@result` lines):
 //!
 //!   nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs N (the CPU count)] [--update <pkg> | --no-update] [--keys <prod.keys>]
+//!        <input> is a Switch package or folder (.nsp, .nup, .xci, .nro, exefs/) or a decrypted 3DS
+//!        dump (.3ds .cia .cxi .app; translate-only in the first waves: `--no-build` stages the C
+//!        and the data folder, a full build says what is not built yet)
 //!   nxrs-build update-info [--game <game>] <package>...
 //!   nxrs-build dlc install|sync|remove|list --datadir <dir> [package or title id...]
 //!   nxrs-build profile <title id> [<main build id>]
@@ -59,7 +62,7 @@ pub const CONTRACT: &str = "nxrs-contract 2";
     about = "Builds a Switch game into a native x86-64 program for this system, Windows or Linux (contract v1; `nxrs-build help` for the subcommands)."
 )]
 struct V1 {
-    /// game folder (exefs/ + romfs/), .nsp or .nup package
+    /// game folder (exefs/ + romfs/), .nsp or .nup package, or a decrypted 3DS dump (.3ds .cia .cxi)
     input: Option<PathBuf>,
     /// output name (no extension)
     #[arg(short = 'o', long = "out")]
@@ -372,7 +375,7 @@ fn update_info(o: &Out, packages: &[PathBuf], game: Option<&Path>, keys: Option<
 #[derive(Parser)]
 #[command(
     name = "nxrs-build",
-    about = "nxrs engine: builds Switch games into native Windows programs"
+    about = "nxrs engine: builds Switch games into native programs, and translates decrypted 3DS dumps (.3ds .cia .cxi) the same way"
 )]
 struct V2 {
     #[command(subcommand)]
@@ -398,7 +401,9 @@ struct PkgArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build a game: <outdir>\<name>.exe, <name>_code.dll and <name>_data\.
+    /// Build a game: <outdir>\<name>.exe, <name>_code.dll and <name>_data\. Switch packages and
+    /// folders build and play; a decrypted 3DS dump (.3ds .cia .cxi .app) translates and stages
+    /// its data folder (--no-build) until the 3DS engine runtime is built.
     Build {
         input: PathBuf,
         #[arg(short = 'o', long = "out")]
@@ -840,6 +845,9 @@ fn doctor() -> i32 {
         Some(p) => check(p.is_file(), format!("keys: {} (present; never read here)", p.display())),
         None => check(false, "keys: none installed (NXRS_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
     }
+    out::line(
+        "info  3DS: decrypted dumps (.3ds .cia .cxi) need no keys; encrypted ones are refused until a decryption lane exists",
+    );
     i32::from(bad > 0)
 }
 

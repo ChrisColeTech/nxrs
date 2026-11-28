@@ -21,6 +21,8 @@ pub enum Event {
         files: usize,
         bytes: usize,
         overrides: usize,
+        /// functions discovery found across the title's programs
+        functions: usize,
     },
     /// smth worth knowing that doesn't stop it
     Note(String),
@@ -163,10 +165,12 @@ pub fn generate(
         sources.push("natives.c".to_owned());
     }
     let bytes = generated.iter().map(|(_, contents)| contents.len()).sum();
+    let functions = analyses.iter().map(|analysis| analysis.functions.len()).sum();
     events(Event::Generated {
         files: generated.len(),
         bytes,
         overrides: by_hand,
+        functions,
     });
     Ok(Generated {
         dir: dir.to_path_buf(),

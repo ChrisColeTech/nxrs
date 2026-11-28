@@ -2,12 +2,13 @@
 //! the code and its layout from the exe partition, the modules and their descriptions from RomFS
 //! only what's needed gets loaded, dumps can be gigabytes
 //! reads go through [`Blob`], the positional seek/read the Switch package's readers use
-//! (`package::io::Blob`'s shape; its module is private to that crate, so the twin lives here until the
-//! crates share it), so one open path serves both consoles and no read holds a lock
+//! (`package::io::Blob`, public since 3DS-W1), so one open path serves both consoles and no read
+//! holds a lock
 
 use std::fmt;
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+pub use translator::package::io::Blob;
 
 /// NCSD and NCCH header offsets and sizes count in these
 const MEDIA_UNIT: u64 = 0x200;
@@ -33,6 +34,19 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<String> for Error {
+    fn from(message: String) -> Error {
+        Error(message)
+    }
+}
+
+/// the Switch package's errors carry a path; this crate's refusals keep their own verbatim text
+impl From<translator::package::PackageError> for Error {
+    fn from(error: translator::package::PackageError) -> Error {
+        Error(error.to_string())
+    }
+}
+
 pub(crate) fn error<T>(message: impl Into<String>) -> Result<T, Error> {
     Err(Error(message.into()))
 }
@@ -52,62 +66,6 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 fn ascii(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
-
-/// positional reads from a dump file: nothing holds a cursor, so one `Blob` can be shared by every reader
-/// thread (`Arc<Blob>`), and a gigabyte dump is never loaded whole. The shape of the Switch package's
-/// `package::io::Blob`, answering this crate's [`Error`].
-pub struct Blob {
-    pub path: PathBuf,
-    pub size: u64,
-    file: File,
-}
-
-#[cfg(windows)]
-fn pread(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
-}
-
-#[cfg(unix)]
-fn pread(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-    std::os::unix::fs::FileExt::read_at(file, buf, offset)
-}
-
-impl Blob {
-    pub fn open(path: &Path) -> Result<Blob, Error> {
-        let file = File::open(path)?;
-        let size = file.metadata()?.len();
-        Ok(Blob {
-            path: path.to_path_buf(),
-            size,
-            file,
-        })
-    }
-
-    /// fills buf from offset, a short file is an error
-    pub fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-        if offset
-            .checked_add(buf.len() as u64)
-            .map_or(true, |end| end > self.size)
-        {
-            return error(format!("{}: data at {offset:#x} is cut short", self.path.display()));
-        }
-        let mut done = 0;
-        while done < buf.len() {
-            let n = pread(&self.file, &mut buf[done..], offset + done as u64)?;
-            if n == 0 {
-                return error(format!("{}: data at {offset:#x} is cut short", self.path.display()));
-            }
-            done += n;
-        }
-        Ok(())
-    }
-
-    pub fn read_at(&self, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
-        let mut buf = vec![0u8; size as usize];
-        self.read_into(offset, &mut buf)?;
-        Ok(buf)
-    }
 }
 
 /// where one code segment gets mapped, from the exheader
@@ -315,8 +273,12 @@ pub struct Title {
     blob: Blob,
     program_id: u64,
     pub exheader: ExHeader,
+    /// the exheader's first 0x400 bytes, as the dump carries them (staged beside the code)
+    pub exheader_raw: Vec<u8>,
     /// where .code sits in the dump, and its size
     code: (u64, u64),
+    /// where the ExeFS `icon` (an SMDH) sits, and its size
+    icon: Option<(u64, u64)>,
     pub romfs: Option<RomFs>,
 }
 
@@ -332,7 +294,9 @@ impl Title {
         let ncch = match &start[0x100..0x104] {
             b"NCSD" => u32_at(&start, 0x120) as u64 * MEDIA_UNIT,
             b"NCCH" => 0,
-            _ if u32_at(&start, 0) == CIA_HEADER_SIZE => cia_executable(&start, |offset, len| blob.read_at(offset, len as u64))?,
+            _ if u32_at(&start, 0) == CIA_HEADER_SIZE => {
+                cia_executable(&start, |offset, len| Ok(blob.read_at(offset, len as u64)?))?
+            }
             _ => return error("not a 3DS cartridge image, .cia or executable"),
         };
         Title::from_ncch(blob, ncch)
@@ -359,27 +323,36 @@ impl Title {
         let romfs_offset = ncch + u32_at(&header, 0x1B0) as u64 * MEDIA_UNIT;
         let has_romfs = u32_at(&header, 0x1B4) != 0 && flags[7] & 0x02 == 0;
 
-        let exheader = ExHeader::read(&blob.read_at(ncch + NCCH_HEADER_SIZE, 0x400)?);
+        let exheader_raw = blob.read_at(ncch + NCCH_HEADER_SIZE, 0x400)?;
+        let exheader = ExHeader::read(&exheader_raw);
 
         // ten files, a name, offset past the header and size each
         let table = blob.read_at(exefs, EXEFS_HEADER_SIZE)?;
-        let code = table
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .take(10)
-            .find(|entry| ascii(&entry[..8]) == ".code")
-            .map(|entry| (exefs + EXEFS_HEADER_SIZE + u32_at(entry, 8) as u64, u32_at(entry, 12) as u64))
-            .ok_or_else(|| {
-                Error(if no_crypto {
-                    "the ExeFS has no .code".into()
-                } else {
-                    "the dump is encrypted, it has to be decrypted first (the ExeFS has no .code)".into()
+        let entry = |name: &str| {
+            table
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .take(10)
+                .find(|entry| ascii(&entry[..8]) == name)
+                .map(|entry| {
+                    (
+                        exefs + EXEFS_HEADER_SIZE + u32_at(entry, 8) as u64,
+                        u32_at(entry, 12) as u64,
+                    )
                 })
-            })?;
+        };
+        let code = entry(".code").ok_or_else(|| {
+            Error(if no_crypto {
+                "the ExeFS has no .code".into()
+            } else {
+                "the dump is encrypted, it has to be decrypted first (the ExeFS has no .code)".into()
+            })
+        })?;
+        let icon = entry("icon").or_else(|| entry(".icon"));
 
         let romfs = if has_romfs { read_romfs(&blob, romfs_offset).ok() } else { None };
-        Ok(Title { blob, program_id, exheader, code, romfs })
+        Ok(Title { blob, program_id, exheader, exheader_raw, code, icon, romfs })
     }
 
     pub fn program_id(&self) -> u64 {
@@ -387,7 +360,7 @@ impl Title {
     }
 
     fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
-        self.blob.read_at(offset, len as u64)
+        Ok(self.blob.read_at(offset, len as u64)?)
     }
 
     /// the code, all three segments back to back, decompressed
@@ -406,6 +379,13 @@ impl Title {
         let len = len.min(file.data_size.saturating_sub(offset) as usize);
         self.read(romfs.data + file.data_offset + offset, len).ok()
     }
+
+    /// the ExeFS `icon` (an SMDH: the card's icons and titles), when the title carries one
+    /// (the ExeFS names it `icon`; some tools spell it `.icon`)
+    pub fn icon(&self) -> Option<Vec<u8>> {
+        let (offset, size) = self.icon?;
+        self.read(offset, size as usize).ok()
+    }
 }
 
 /// level 3 tables of the RomFS whose IVFC header sits at offset
@@ -422,7 +402,9 @@ fn read_romfs(blob: &Blob, offset: u64) -> Result<RomFs, Error> {
     if u32_at(&header, 0) != 0x28 {
         return error("the RomFS level 3 header is not 0x28 bytes");
     }
-    let table = |at: usize| -> Result<Vec<u8>, Error> { blob.read_at(level3 + u32_at(&header, at) as u64, u32_at(&header, at + 4) as u64) };
+    let table = |at: usize| -> Result<Vec<u8>, Error> {
+        Ok(blob.read_at(level3 + u32_at(&header, at) as u64, u32_at(&header, at + 4) as u64)?)
+    };
     Ok(RomFs {
         dirs: table(0x0C)?,
         files: table(0x1C)?,
@@ -506,6 +488,11 @@ pub(crate) mod tests {
 
     /// the bytes of that .cxi (the title.rs fixtures build containers around them)
     pub(crate) fn rom_bytes(code: &[u8], files: &[(&str, &[u8])]) -> Vec<u8> {
+        rom_bytes_icon(code, files, None)
+    }
+
+    /// the same .cxi with an ExeFS `.icon` (an SMDH) beside the `.code` when there is one
+    pub(crate) fn rom_bytes_icon(code: &[u8], files: &[(&str, &[u8])], icon: Option<&[u8]>) -> Vec<u8> {
         // NCCH header (never encrypted), exheader after it, ExeFS at 0x600 w/ .code as its only file
         let mut out = vec![0; 0x800];
         put(&mut out, 0x100, b"NCCH");
@@ -518,6 +505,15 @@ pub(crate) mod tests {
         put(&mut out, 0x600, b".code");
         put(&mut out, 0x60C, &(code.len() as u32).to_le_bytes());
         out.extend_from_slice(code);
+        if let Some(icon) = icon {
+            // the .icon goes in the ExeFS's second slot, its bytes after the .code's
+            let at = out.len().next_multiple_of(0x40);
+            put(&mut out, 0x610, b".icon");
+            put(&mut out, 0x618, &((at - 0x800) as u32).to_le_bytes());
+            put(&mut out, 0x61C, &(icon.len() as u32).to_le_bytes());
+            out.resize(at, 0);
+            out.extend_from_slice(icon);
+        }
         if !files.is_empty() {
             let (at, romfs) = (out.len().next_multiple_of(MEDIA_UNIT as usize), romfs(files));
             put(&mut out, 0x1B0, &((at as u64 / MEDIA_UNIT) as u32).to_le_bytes());
@@ -604,6 +600,46 @@ pub(crate) mod tests {
         out.resize(0x60 + data_at, 0);
         out.extend(data);
         out
+    }
+
+    /// a tiny SMDH: one title (short, long, publisher, UTF-16) and a 48x48 RGB565 icon of one colour
+    pub(crate) fn smdh(short: &str, long: &str, publisher: &str, pixel: u16) -> Vec<u8> {
+        let utf16 = |text: &str| -> Vec<u8> {
+            text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+        };
+        let mut out = vec![0u8; 0x36C0];
+        put(&mut out, 0, b"SMDH");
+        put(&mut out, 0x10, &utf16(short));
+        put(&mut out, 0x50, &utf16(long));
+        put(&mut out, 0xD0, &utf16(publisher));
+        let icon: Vec<u8> = (0..48 * 48).flat_map(|_| pixel.to_le_bytes()).collect();
+        put(&mut out, 0x2480, &icon);
+        out
+    }
+
+    /// the ExeFS `.icon` (an SMDH) reads back whole when the fixture carries one, and a title
+    /// without one says so
+    #[test]
+    fn the_exefs_icon_reads_back() {
+        let icon = smdh("Fixture", "Fixture Long", "nxrs", 0xF800);
+        let path = std::env::temp_dir().join(format!(
+            "3dsrecomp-icon-fixture-{}.cxi",
+            std::process::id()
+        ));
+        std::fs::write(&path, rom_bytes_icon(&[1, 2, 3, 4], &[("static.crs", b"crs")], Some(&icon)))
+            .unwrap();
+        let title = Title::load(&path).unwrap();
+        assert_eq!(title.icon().unwrap(), icon);
+        assert_eq!(title.code().unwrap(), [1, 2, 3, 4]);
+        drop(title);
+        std::fs::remove_file(path).unwrap();
+
+        // no .icon entry: none comes back
+        let path = rom("no-icon", &[1], &[]);
+        let title = Title::load(&path).unwrap();
+        assert!(title.icon().is_none());
+        drop(title);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// the fixture reads back as the title it describes

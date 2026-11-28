@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 translator = { path = "../translator" }
+translator3ds = { path = "../translator3ds" }
 profiles = { path = "../profiles" }
 shaders = { path = "../shaders" }
 anyhow = "1"

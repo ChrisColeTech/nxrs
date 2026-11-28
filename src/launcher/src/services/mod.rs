@@ -43,4 +43,6 @@ mod library_tests;
 #[cfg(test)]
 mod services_tests;
 #[cfg(test)]
+mod sources3ds_tests;
+#[cfg(test)]
 mod sources_tests;

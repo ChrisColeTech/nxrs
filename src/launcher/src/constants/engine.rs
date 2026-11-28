@@ -66,8 +66,14 @@ pub const STOPPING: &str = "Stopping build processes";
 pub const PACKAGE_DLC_LINE: &str = "DLC: this package also holds add-on content";
 pub const DLC_ERROR: &str = "DLC error: ";
 pub const UPDATE_ERROR: &str = "UPDATE error: ";
-/// Covers found in a native build's data folder, in this order.
-pub const BUILD_ICONS: [&str; 3] = ["icon.jpg", "icon.png", "icon_AmericanEnglish.dat"];
+/// Covers found in a native build's data folder, in this order (a 3DS build stages its SMDH as
+/// `control.smdh`; the artwork decoder reads its icon by the SMDH magic).
+pub const BUILD_ICONS: [&str; 4] = [
+    "icon.jpg",
+    "icon.png",
+    "icon_AmericanEnglish.dat",
+    "control.smdh",
+];
 /// The engine's own folders, in a game's data folder.
 pub const NACP: &str = "control.nacp";
 pub const NACP_VERSION_AT: u64 = 0x3060;

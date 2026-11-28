@@ -8,6 +8,9 @@ description = "RecompLauncher engine: 3DS package input and the ARM11/Thumb -> C
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+translator = { path = "../translator" }
+
 # the donor gates its verify lane's bits on this feature (cro.rs); the lane itself is 3DS-W8
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("verify"))'] }
