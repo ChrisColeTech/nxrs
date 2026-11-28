@@ -325,7 +325,7 @@ No srv/fs/hid/cfg/ptm gap: every core-service call the title made was answered f
 
 ### Unproven / next
 
-1. **runtime3ds (owner of the kernel table):** `park_wait`'s post-wake answer (index of the signaling
+1. **(Done below, lead decision: folded into W3.)** **runtime3ds (owner of the kernel table):** `park_wait`'s post-wake answer (index of the signaling
    handle + `R_OK`; `-1` + `0x09401BFE` on timeout); acquire/decrement/reset in `wait_ready`'s
    immediate path; the `/100` timeout scaling; `GetProcessId` (0x35). The experiment diff is the
    smallest version of the first item. With it, the APT lock can become a real kernel mutex.
@@ -334,3 +334,57 @@ No srv/fs/hid/cfg/ptm gap: every core-service call the title made was answered f
    HID) sits behind the main thread's wait on those completions.
 3. Input reaching the title's own logic is therefore unproven; the ring and events are tested and
    were published 1,216 times in the experiment run.
+
+### Follow-up: the runtime3ds wait fix, folded into W3 (lead decision, 2026-11-28)
+
+**Correction (`src/runtime3ds`).** `park_wait` now answers per the kernel ABI (3dbrew `SVC`,
+Citra `WaitSynchronizationN`): the first ready handle is *acquired* and answers `r0 = 0`, `r1 = its
+index`; a parked wait woken by a signal answers `r0 = 0`, `r1 = the signaling handle's index`; a
+timeout (or a poll with `ns = 0`) answers `r0 = 0x09401BFE`, `r1 = -1`. Acquisition lives in the new
+`try_acquire`: a one-shot/pulse event resets, a mutex is owned (owner + count, so the owner's
+`ReleaseMutex` succeeds), a semaphore is decremented. `GuestThread::park_until` / `park_thread`
+return the object that woke the thread (they used to drop it). A woken mutex or semaphore waiter
+races for the object and parks again if another thread took it; `ReleaseSemaphore` now wakes its
+waiters (it woke nobody before). `GetProcessId` (0x35) moved into the kernel table (`r1` = id `1`
+for `0xFFFF8001` or a duplicate of it, `0xD8E007F7` for another handle); the os3ds stand-in is
+removed. Untouched: `mem.rs`, `context.rs`, `Cargo.toml` (gameplay-harness `8b4f26b`'s spots), the
+`/100` timeout scaling, and the small window between a failed `try_acquire` and the park (a signal
+landing there leaves the event signaled and is picked up by the next signal or the timeout).
+
+**APT lock.** With waits taking mutexes, the service-side lock was wrong to keep: `GetLockHandle`
+now hands out a copy of one real kernel mutex APT creates unlocked (Citra's `APT_U:Lock`), and the
+os3ds Wait/Release/Close interceptions for it are gone. In the boot the title releases it 7 times
+from thread 0 and thread 2 (`svc [7x] 0x14 ReleaseMutex -> 0x00000000`); the ledger line is gone.
+
+**Tests.** `src/runtime3ds/tests/wait_answers.rs` (Rust `Code` entries, no compiler): a free mutex
+wait answers `(0, 0)` and the owner's release succeeds; a 1-count semaphore answers `(0, 0)` then a
+poll `(0x09401BFE, -1)`; a signaled one-shot event the same; a parked 1 ms wait times out with
+`(0x09401BFE, -1)`; a parked infinite wait on `[quiet, woken]` woken by a child thread's
+`SignalEvent` answers `(0, 1)`. Against the previous `lib.rs`/`thread.rs`/`svc.rs` it fails (the
+mutex release answered `0xD8E007EE`). `svc::tests::get_process_id_answers_in_r1`.
+`cargo test --release -p runtime3ds -p os3ds`: 73 passed, 0 failed (runtime3ds 50, os3ds 23).
+
+**The boot on the committed tree** (`build/DS/W3/sonic/boot.log`, 20 s cap, same DLL and input):
+
+- No break; `stop: Time` after 20 s. 0 faults, 0 runtime gaps.
+- GSP thread 3: `gsp vblank pairs pushed 1214, frames 1216`; `svc [1223x] 0x25
+  WaitSynchronizationN -> 0x00000000` with `svc [1216x] 0x19 ClearEvent` (the title's GSP event
+  thread draining the interrupt queue each frame).
+- APT thread 2: polls on its timeout, `svc [648x] 0x25 WaitSynchronizationN -> 0x09401bfe` (r1 = -1,
+  so the loop goes round instead of panicking).
+- HID: `pad updates 1216`; all five script steps applied (`2508 ms: start`, `3509 ms: neutral`,
+  `5007 ms: a`, `6007 ms: neutral`).
+- Main thread 0: parked at `0x2A7B28`, right after `svc 0x22` (ArbitrateAddress, type 1 = wait
+  while the word is below the value) at `0x2A7B24`; `svc [2428x] 0x22 ArbitrateAddress` - about two
+  per frame, i.e. it wakes each frame, finds the condition unmet and waits again. It entered that
+  loop after `TriggerCmdReqQueue` submitted a process-command-list and a display-transfer, which are
+  refused and raise no P3D/PPF interrupt.
+
+**Boundary reached.** Service init complete; the title's own vblank/APT/arbiter loops run
+steady-state; the main thread waits frame after frame for GX completion. That wait at
+`0x2A7B24` is **W4's entry point**: once PICA executes the command list and the display transfer and
+raises P3D/PPF, the main thread proceeds toward the menu loop. The scripted input is published in
+the HID ring, but no trace shows the title reading it yet (the menu logic is behind the W4 wait).
+
+**Gaps (`gaps.txt`):** `AppletUtility 0x7`, `AppletUtility 0x4` (no applet manager), `gsp 0x0001`
+x64 / `0x0002` x4 register writes (W4), GX process command list (W4), GX display transfer (W4).

@@ -236,6 +236,11 @@ fn run(
         (input.applied.clone(), input.serves, input.updates)
     };
     log.push_str(&format!("hid shared-memory serves {serves}, pad updates {updates}\n"));
+    log.push_str(&format!(
+        "gsp vblank pairs pushed {}, frames {}\n",
+        host.vblanks.load(std::sync::atomic::Ordering::Relaxed),
+        host.frames.load(std::sync::atomic::Ordering::Relaxed)
+    ));
     for index in 0..8 {
         if let Some((pc, budget, thumb)) = process.thread_pc(index) {
             log.push_str(&format!("thread {index} parked at {pc:#x} (thumb {thumb}, budget {budget})\n"));
