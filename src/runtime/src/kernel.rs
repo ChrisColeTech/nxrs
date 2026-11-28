@@ -998,9 +998,10 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 let t0 = acct_t0();
                 std::thread::sleep(Duration::from_nanos(ns as u64));
                 if let Some(t0) = t0 {
+                    // keyed by the time asked for: what the host's sleep makes of it
                     crate::waitacct::add(
                         crate::waitacct::K_SLEEP,
-                        0,
+                        ns as u64,
                         t0.elapsed().as_nanos() as u64,
                         crate::waitacct::BY_NONE,
                     );

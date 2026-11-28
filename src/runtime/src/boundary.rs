@@ -106,9 +106,18 @@ pub unsafe extern "C" fn nxrt_host_invoke(c: *mut Cpu) -> u32 {
         crate::hostfn::count_call(pc);
         PENDING.set(0);
         let sc = crate::kernel::sched();
+        let t0 = crate::waitacct::on().then(std::time::Instant::now);
         sc.host_enter();
         f(c);
         sc.host_leave();
+        if let Some(t0) = t0 {
+            crate::waitacct::add(
+                crate::waitacct::K_CALL,
+                pc,
+                t0.elapsed().as_nanos() as u64,
+                crate::waitacct::BY_NONE,
+            );
+        }
         match PENDING.replace(0) {
             0 => ST_RETURN,
             1 => ST_REDISPATCH, // c->pc still holds the jump's target

@@ -5,7 +5,9 @@
 //! (fence, present and queue waits, services that block: the os layer's `without_core`, keyed by the host function
 //! the thread is in) and the wait for a virtual core. Each entry keeps its count, total and longest time, and the
 //! time by who ended it: the guest thread that unlocked, signalled or woke it, a host thread (by name), or nobody (a
-//! timeout). A `waits:` block goes to the log every 10 s: per thread its CPU share (from the OS), its entry function,
+//! timeout). Beside the waits, the wall time inside each host function (`call`) and each SVC that is not a kernel wait
+//! (`svc`, IPC by session handle) is kept the same way, outside the waits' sum (it includes their own blocking waits).
+//! A `waits:` block goes to the log every 10 s: per thread its CPU share (from the OS), its entry function,
 //! the time it was neither running nor in a counted wait, and its top waits in ms a second with their wakers. That is
 //! the chain: what a thread waits on, who ends that wait, and what that thread waits on in turn.
 //!
@@ -27,7 +29,11 @@ pub const K_SLEEP: u8 = 4;
 pub const K_HOST: u8 = 5;
 /// The wait for a virtual core (the os scheduler).
 pub const K_CORE: u8 = 6;
-const KIND_NAMES: [&str; 7] = ["mutex", "condvar", "address", "sync", "sleep", "host", "core"];
+/// Time inside a host function (wall time, its own blocking waits included: not a wait, not in the waits' sum).
+pub const K_CALL: u8 = 7;
+/// Time inside an SVC that is not a kernel wait (IPC to services and the rest; not in the waits' sum).
+pub const K_SVC: u8 = 8;
+const KIND_NAMES: [&str; 9] = ["mutex", "condvar", "address", "sync", "sleep", "host", "core", "call", "svc"];
 
 /// A waker that is a host thread: this bit, and the index of its name.
 pub const BY_HOST: u32 = 0x8000_0000;
@@ -194,15 +200,18 @@ fn waker_name(w: u32, names: &[String]) -> String {
 
 fn key_name(kind: u8, key: u64) -> String {
     match kind {
-        K_HOST => crate::hostfn::name_of(key).unwrap_or_else(|| format!("{key:#x}")),
+        K_HOST | K_CALL => crate::hostfn::name_of(key).unwrap_or_else(|| format!("{key:#x}")),
+        K_SVC if key & 0xffff_ffff != 0 => format!("{:#x} h{:#x}", key >> 32, key & 0xffff_ffff),
+        K_SVC => format!("{:#x}", key >> 32),
         K_SYNC => format!("h{key:#x}"),
+        K_SLEEP if key > 0 => format!("{:.0} us asked", key as f64 / 1e3),
         K_SLEEP | K_CORE => String::new(),
         _ => format!("{key:#x}"),
     }
 }
 
 /// The most waits listed per thread, and the most threads listed.
-const TOP_WAITS: usize = 6;
+const TOP_WAITS: usize = 10;
 const TOP_THREADS: usize = 16;
 
 /// The `waits:` block of one period: threads by CPU + wait time (the main thread 0x1001 always), each with its CPU
@@ -224,7 +233,9 @@ pub fn report(
     for h in cpu.keys() {
         per.entry(*h).or_default();
     }
-    let waited = |v: &Vec<(&(u32, u8, u64), &Acc)>| v.iter().map(|(_, a)| a.ns).sum::<u64>() as f64 / 1e9 / secs;
+    let waited = |v: &Vec<(&(u32, u8, u64), &Acc)>| {
+        v.iter().filter(|(k, _)| k.1 < K_CALL).map(|(_, a)| a.ns).sum::<u64>() as f64 / 1e9 / secs
+    };
     let mut ths: Vec<(u32, f64, f64)> = per
         .iter()
         .map(|(h, v)| (*h, cpu.get(h).copied().unwrap_or(0.0), waited(v)))
@@ -294,6 +305,8 @@ mod tests {
         t.add(0x1001, K_CONDVAR, 0x5000, 2_000_000, BY_HOST);
         t.add(0x1001, K_HOST, 0x77, 1_000_000, BY_NONE);
         t.add(0x1004, K_SYNC, 0x10a2, 500_000, BY_NONE);
+        // a host function's wall time is listed but not counted as a wait
+        t.add(0x1004, K_CALL, 0x99, 200_000, BY_NONE);
         let a = &t.m[&(0x1001, K_CONDVAR, 0x5000)];
         assert_eq!((a.n, a.ns, a.max), (2, 8_000_000, 6_000_000));
         assert_eq!(a.by[&0x1004], 6_000_000);
@@ -313,7 +326,9 @@ mod tests {
             r[1],
             "waits: 0x1001 e1001 cpu 10%, in waits 9%, other 81%: condvar 0x5000 80.0 (20/s, 6.0; by 0x1004 75%, host:vk replay 25%) | host nvnSyncWait 10.0 (10/s, 1.0; by timeout 100%)"
         );
-        assert!(r[2].starts_with("waits: 0x1004 e1004 cpu 50%") && r[2].contains("sync h0x10a2 5.0"), "{}", r[2]);
+        assert!(r[2].starts_with("waits: 0x1004 e1004 cpu 50%, in waits 5%") && r[2].contains("sync h0x10a2 5.0"), "{}", r[2]);
+        assert!(r[2].contains("| call 0x99 2.0 (10/s"), "{}", r[2]);
+        assert_eq!(key_name(K_SVC, 0x21 << 32 | 0x10f0), "0x21 h0x10f0");
     }
 
     #[test]
