@@ -19,6 +19,10 @@ pub const R_TIMEOUT: u32 = 0x0940_1BFE;
 pub const R_INVALID: u32 = 0xD8E0_07EE;
 /// the success result
 pub const R_OK: u32 = 0;
+/// 3dbrew: the handle does not name an object of the expected kind
+pub const R_INVALID_HANDLE: u32 = 0xD8E0_07F7;
+/// the id GetProcessId answers for the one process this host runs
+pub const PROCESS_ID: u32 = 1;
 
 /// a handler an os layer installs ahead of the kernel table (os3ds, W3)
 pub type SvcHandler = fn(&Process3ds, &mut Context, u32) -> bool;
@@ -443,6 +447,16 @@ fn kernel(process: &Process3ds, state: &mut ThreadState, number: u32) {
             ctx.r[1] = id;
             ctx.r[0] = R_OK;
         }
+        // GetProcessId: r1 process handle -> r1 process id (the title's wrapper at 0x29FB28
+        // reads r1); this host runs one process
+        0x35 => {
+            if process.is_process_handle(ctx.r[1]) {
+                ctx.r[1] = PROCESS_ID;
+                ctx.r[0] = R_OK;
+            } else {
+                ctx.r[0] = R_INVALID_HANDLE;
+            }
+        }
         // GetResourceLimit: r1 process handle -> r1 limit object handle
         0x38 => {
             let process_handle = ctx.r[1];
@@ -730,6 +744,22 @@ mod tests {
         state.ctx.r[0] = RESOURCE_LIMIT_HANDLE;
         dispatch(&process, &mut state, 0x23);
         assert_eq!(state.ctx.r[0], R_OK, "the limit handle is a valid handle to close");
+    }
+
+    /// GetProcessId answers the id in r1 for the current-process handle and its duplicates
+    #[test]
+    fn get_process_id_answers_in_r1() {
+        let (_memory, process, mut state) = process_and_state();
+        state.ctx.r[1] = 0xFFFF_8001;
+        dispatch(&process, &mut state, 0x35);
+        assert_eq!((state.ctx.r[0], state.ctx.r[1]), (R_OK, PROCESS_ID));
+        let copy = process.duplicate_handle(0xFFFF_8001, 0).unwrap();
+        state.ctx.r[1] = copy;
+        dispatch(&process, &mut state, 0x35);
+        assert_eq!((state.ctx.r[0], state.ctx.r[1]), (R_OK, PROCESS_ID));
+        state.ctx.r[1] = 0x1234;
+        dispatch(&process, &mut state, 0x35);
+        assert_eq!(state.ctx.r[0], R_INVALID_HANDLE);
     }
 
     /// kernel ABI: query and info svcs answer in registers, not through the wrapper's pointers

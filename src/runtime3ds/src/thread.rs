@@ -146,9 +146,9 @@ pub struct ThreadRun {
 }
 
 impl GuestThread {
-    /// parks the host thread until the wait ends or the timeout passes; says whether it woke
-    /// for real (signaled) or by timeout
-    pub fn park_until(&self, timeout: Option<std::time::Duration>) -> bool {
+    /// parks the host thread until the wait ends or the timeout passes; the object that
+    /// signaled it, or `None` for a timeout (or a wait ended without a signal)
+    pub fn park_until(&self, timeout: Option<std::time::Duration>) -> Option<u32> {
         let deadline = timeout.map(|left| std::time::Instant::now() + left);
         let mut state = self.state.lock().unwrap();
         loop {
@@ -182,10 +182,8 @@ impl GuestThread {
                 }
             }
         }
-        let woke = state.woke_by.is_some();
-        state.woke_by = None;
         state.waiting = Waiting::None;
-        woke
+        state.woke_by.take()
     }
 
     /// signals a parked thread (its wait is satisfied by `object`)

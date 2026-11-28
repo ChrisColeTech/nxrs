@@ -49,14 +49,15 @@ pub const SIGNAL_WAKEUP: u32 = 1;
 pub fn command(host: &Host, process: &Process3ds, tls: u32, request: &Request) -> Reply {
     match request.cmd {
         GET_LOCK_HANDLE => {
-            // the APT lock is a mutex the service hands out already held; the app releases it
-            let lock = host.state.lock().unwrap().fresh_handle();
-            host.set_apt_lock(lock);
-            host.say(format!("apt: GetLockHandle -> {lock:#x}"));
-            // named once: the lock is held service-side because runtime3ds's WaitSynchronization
-            // does not take ownership of a kernel mutex (so its ReleaseMutex would fail)
-            host.gap("apt: the APT lock is a service-side lock (runtime3ds waits do not acquire kernel mutexes)");
-            Reply::new(vec![R_OK, 0, 0, 0, lock], 2)
+            // the APT lock is one kernel mutex APT owns, created unlocked; each GetLockHandle
+            // copies a handle to it (the app waits on it and releases it like any mutex)
+            let lock = {
+                let mut state = host.state.lock().unwrap();
+                *state.apt_lock.get_or_insert_with(|| process.create_mutex(false, 0))
+            };
+            let copy = process.duplicate_handle(lock, 0).unwrap_or(lock);
+            host.say(format!("apt: GetLockHandle -> {copy:#x} (kernel mutex {lock:#x})"));
+            Reply::new(vec![R_OK, 0, 0, 0, copy], 2)
         }
         INITIALIZE => {
             // response: result, translation descriptor 0x04000000 + the notification and

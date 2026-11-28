@@ -33,8 +33,6 @@ pub fn install(host: Arc<Host>) {
     svc::set_handler(0x1F, map_block_handler);
     svc::set_handler(0x20, unmap_block_handler);
     svc::set_handler(0x23, close_handler);
-    // runtime3ds's kernel table does not answer GetProcessId; the title asks before its srv init
-    svc::set_handler(0x35, get_process_id_handler);
     // diagnostics: name the mutex handle/thread of every ReleaseMutex, then let the kernel answer
     svc::set_handler(0x14, release_mutex_probe);
     svc::set_handler(0x24, wait_one_probe);
@@ -65,10 +63,6 @@ fn break_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
 
 fn wait_one_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
     if let Some(host) = host() {
-        if host.is_apt_lock(ctx.r[0]) {
-            ctx.r[0] = hle::R_OK;
-            return true;
-        }
         let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
         let ns = (ctx.r[2] as u64) | ((ctx.r[3] as u64) << 32);
         probe(host, format!(
@@ -83,14 +77,6 @@ fn wait_one_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool
 fn wait_n_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
     if let Some(host) = host() {
         let count = ctx.r[2].min(8);
-        if count == 1 {
-            let handle = process.memory.read32(ctx.r[1]);
-            if host.is_apt_lock(handle) {
-                ctx.r[0] = hle::R_OK;
-                ctx.r[1] = 0;
-                return true;
-            }
-        }
         let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
         let mut handles = Vec::new();
         for i in 0..count {
@@ -106,11 +92,6 @@ fn wait_n_probe(process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
 
 fn release_mutex_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
     let Some(host) = host() else { return false };
-    if host.is_apt_lock(ctx.r[0]) {
-        // the APT lock: a service-owned sync object, released from whichever applet thread holds it
-        ctx.r[0] = hle::R_OK;
-        return true;
-    }
     let thread = unsafe { runtime3ds::thread::ThreadState::of(ctx) }.thread;
     probe(host, format!(
         "svc ReleaseMutex handle {:#x} thread {thread} at {:#x}",
@@ -118,13 +99,6 @@ fn release_mutex_probe(_process: &Process3ds, ctx: &mut Context, _number: u32) -
     ));
     // false: the kernel table's own ReleaseMutex runs
     false
-}
-
-/// SVC 0x35 GetProcessId: r1 = process id (the wrapper at 0x29FB28 reads r1)
-fn get_process_id_handler(_process: &Process3ds, ctx: &mut Context, _number: u32) -> bool {
-    ctx.r[0] = hle::R_OK;
-    ctx.r[1] = 1;
-    true
 }
 
 /// SVC 0x2D: r0 = out pointer, r1 = name; r0 = result, r1 = session handle (the Kernel ABI the

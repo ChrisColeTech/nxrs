@@ -536,15 +536,16 @@ impl Process3ds {
         self.kernel.lock().unwrap().threads.get(index).and_then(|t| t.as_ref()).cloned()
     }
 
-    /// parks the calling thread (its own host thread) for the wait; wakes when it ends
-    pub fn park_thread(&self, index: usize, waiting: Waiting, ns: Option<u64>) {
+    /// parks the calling thread (its own host thread) for the wait; wakes when it ends. The
+    /// object that signaled the wake, or `None` for a timeout.
+    pub fn park_thread(&self, index: usize, waiting: Waiting, ns: Option<u64>) -> Option<u32> {
         static PROBE_PARKS: AtomicU64 = AtomicU64::new(0);
         if std::env::var_os("RUNTIME3DS_PROBE").is_some()
             && PROBE_PARKS.fetch_add(1, Ordering::Relaxed) < 12
         {
             self.say(format!("probe park thread {index}: {waiting:?} timeout {ns:?}"));
         }
-        let Some(thread) = self.thread_of(index) else { return };
+        let thread = self.thread_of(index)?;
         {
             let mut run = thread.state.lock().unwrap();
             run.waiting = waiting;
@@ -559,7 +560,7 @@ impl Process3ds {
         let mut run = thread.state.lock().unwrap();
         run.waiting = Waiting::None;
         run.woke_by = None;
-        let _ = woke;
+        woke
     }
 
     /// the thread's kernel id (svc GetThreadId)
@@ -633,7 +634,8 @@ impl Process3ds {
         true
     }
 
-    /// wakes threads parked on a mutex handle that just freed
+    /// wakes threads parked on a mutex that just freed (or a semaphore that was released); each
+    /// woken thread then tries to take it and parks again if another thread got there first
     fn wake_mutex_waiters(&self, handle: u32) {
         let kernel = self.kernel.lock().unwrap();
         for thread in kernel.threads.iter().flatten() {
@@ -668,6 +670,9 @@ impl Process3ds {
         let semaphore = &mut kernel.semaphores[index];
         let old = semaphore.count as u32;
         semaphore.count = (semaphore.count + count as i32).min(semaphore.max);
+        drop(kernel);
+        // the waiters race for the new count; the losers park again (park_wait)
+        self.wake_mutex_waiters(handle);
         Some(old)
     }
 
@@ -794,43 +799,106 @@ impl Process3ds {
         self.park_thread(thread, Waiting::Object { objects: [handle, 0, 0, 0, 0, 0, 0, 0], count: 1, timeout }, timeout);
     }
 
-    /// svc WaitSynchronization: an event checks its signal, a mutex its freedom, anything else
-    /// waits until signaled; answers r0 (and r1 for the N form's index)
+    /// svc WaitSynchronization1/N (waitAll = 0), kernel ABI (3dbrew `SVC`, Citra's
+    /// `WaitSynchronizationN`): the first object that is ready is *acquired* (a one-shot event
+    /// resets, a mutex is taken, a semaphore decremented) and answers `r0 = 0`, `r1 = its index`;
+    /// otherwise the thread parks, and a wake answers the same for the object that signaled it,
+    /// a timeout answers `r0 = 0x09401BFE`, `r1 = -1`. Says whether the thread parked.
     pub fn park_wait(&self, thread: usize, handles: &[u32], ctx: &mut Context, ns: u64) -> bool {
-        // something already satisfied?
-        for (i, &handle) in handles.iter().enumerate() {
-            if self.wait_ready(handle, thread) {
+        let take = handles.len().min(8);
+        let mut parked = false;
+        loop {
+            if let Some(i) = handles[..take].iter().position(|&handle| self.try_acquire(handle, thread)) {
                 ctx.r[0] = svc::R_OK;
                 ctx.r[1] = i as u32;
-                return false;
+                return parked;
+            }
+            if ns == 0 {
+                // a poll: nothing ready
+                ctx.r[0] = svc::R_TIMEOUT;
+                ctx.r[1] = u32::MAX;
+                return parked;
+            }
+            let timeout = (ns != u64::MAX).then_some(ns);
+            let mut objects = [0u32; 8];
+            objects[..take].copy_from_slice(&handles[..take]);
+            parked = true;
+            let woke = self.park_thread(thread, Waiting::Object { objects, count: take, timeout }, timeout);
+            let Some(object) = woke else {
+                ctx.r[0] = svc::R_TIMEOUT;
+                ctx.r[1] = u32::MAX;
+                return parked;
+            };
+            let Some(i) = handles[..take].iter().position(|&handle| handle == object) else {
+                // woken by something it was not waiting on (the boot's stop): a timeout answer
+                ctx.r[0] = svc::R_TIMEOUT;
+                ctx.r[1] = u32::MAX;
+                return parked;
+            };
+            // a signal_event wake already consumed a one-shot event for its waiters; a mutex or
+            // semaphore is raced for and taken here, or the wait parks again
+            if self.is_event(object) || self.try_acquire(object, thread) {
+                ctx.r[0] = svc::R_OK;
+                ctx.r[1] = i as u32;
+                return parked;
+            }
+            if self.stopped() {
+                ctx.r[0] = svc::R_TIMEOUT;
+                ctx.r[1] = u32::MAX;
+                return parked;
             }
         }
-        if ns == u64::MAX {
-            // forever: still parks, the boot's stop wakes it
-        }
-        let timeout = (ns != u64::MAX).then_some(ns);
-        let mut objects = [0u32; 8];
-        let take = handles.len().min(8);
-        objects[..take].copy_from_slice(&handles[..take]);
-        self.park_thread(thread, Waiting::Object { objects, count: take, timeout }, timeout);
-        ctx.r[0] = svc::R_TIMEOUT;
-        ctx.r[1] = 0;
-        true
     }
 
-    /// is the object ready right now (a signaled event, a free-or-own mutex)
-    fn wait_ready(&self, handle: u32, thread: usize) -> bool {
-        let kernel = self.kernel.lock().unwrap();
-        match kernel.handles.get(&handle) {
-            Some(Object::Event(index)) => kernel.events[*index].signaled,
-            Some(Object::Mutex(index)) => {
-                kernel.mutexes[*index].locked_by.is_none() || kernel.mutexes[*index].locked_by == Some(thread)
+    /// the current-process pseudo handle, or a duplicate of it
+    pub fn is_process_handle(&self, handle: u32) -> bool {
+        handle == 0xFFFF_8001
+            || matches!(self.kernel.lock().unwrap().handles.get(&handle), Some(Object::Process))
+    }
+
+    fn is_event(&self, handle: u32) -> bool {
+        matches!(self.kernel.lock().unwrap().handles.get(&handle), Some(Object::Event(_) | Object::Timer(_)))
+    }
+
+    /// takes the object if it is ready right now: a signaled event (a one-shot one resets), a
+    /// free-or-own mutex (taken: owner + count), a semaphore with a count (decremented), an
+    /// ended thread, a signaled timer
+    pub fn try_acquire(&self, handle: u32, thread: usize) -> bool {
+        let mut kernel = self.kernel.lock().unwrap();
+        let Some(object) = kernel.handles.get(&handle).copied() else { return false };
+        match object {
+            Object::Event(index) => {
+                let event = &mut kernel.events[index];
+                if !event.signaled {
+                    return false;
+                }
+                if event.reset != 1 {
+                    // one-shot and pulse events are consumed by the wait they satisfy
+                    event.signaled = false;
+                }
+                true
             }
-            Some(Object::Semaphore(index)) => kernel.semaphores[*index].count > 0,
-            Some(Object::Thread(index)) => {
-                kernel.threads.get(*index).and_then(|t| t.as_ref()).is_none_or(|t| t.state.lock().unwrap().exited)
+            Object::Mutex(index) => {
+                let mutex = &mut kernel.mutexes[index];
+                if mutex.locked_by.is_some_and(|owner| owner != thread) {
+                    return false;
+                }
+                mutex.locked_by = Some(thread);
+                mutex.count += 1;
+                true
             }
-            Some(Object::Timer(index)) => kernel.events[*index].signaled,
+            Object::Semaphore(index) => {
+                let semaphore = &mut kernel.semaphores[index];
+                if semaphore.count <= 0 {
+                    return false;
+                }
+                semaphore.count -= 1;
+                true
+            }
+            Object::Thread(index) => {
+                kernel.threads.get(index).and_then(|t| t.as_ref()).is_none_or(|t| t.state.lock().unwrap().exited)
+            }
+            Object::Timer(index) => kernel.events[index].signaled,
             _ => false,
         }
     }

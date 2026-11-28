@@ -259,7 +259,7 @@ pub struct State {
     pub gsp_event: Option<u32>,
     pub gsp_shared: Option<u32>,
     pub hid_shared: Option<u32>,
-    /// the APT lock handle (a service-owned sync object, see kernel.rs)
+    /// the APT lock: a kernel mutex, created once (GetLockHandle)
     pub apt_lock: Option<u32>,
     /// the APT parameter event (Initialize's second handle), signaled while a parameter waits
     pub apt_parameter_event: Option<u32>,
@@ -629,29 +629,7 @@ impl Host {
         self.state.lock().unwrap().sessions.get(&handle).copied()
     }
 
-    /// the APT lock is a service-owned sync object (the SDK releases it from several threads;
-    /// runtime3ds's kernel mutex needs a same-thread acquire, so the service models it here)
-    pub fn set_apt_lock(&self, handle: u32) {
-        self.state.lock().unwrap().apt_lock = Some(handle);
-    }
-
-    pub fn apt_lock(&self) -> Option<u32> {
-        self.state.lock().unwrap().apt_lock
-    }
-
-    pub fn is_apt_lock(&self, handle: u32) -> bool {
-        self.state.lock().unwrap().apt_lock == Some(handle)
-    }
-
-    pub fn release_apt_lock(&self) {
-        self.state.lock().unwrap().apt_lock = None;
-    }
-
     pub fn close_session(&self, handle: u32) -> bool {
-        if self.is_apt_lock(handle) {
-            self.release_apt_lock();
-            return true;
-        }
         let mut state = self.state.lock().unwrap();
         if let Some(service) = state.sessions.remove(&handle) {
             match service {
