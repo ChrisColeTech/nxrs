@@ -418,7 +418,10 @@ thread_local! {
 /// ~57 MB a frame of rewritten pages lie in many small ranges, OOT-DESC). As `par_hashes`' hashes, these only decide a
 /// skip: they are taken after the scan reset the pages' write watch, so a store made after the hash is found by the next
 /// scan. Kept until `prehash_clear`. `NXGFX_PREHASH=0`: off.
-pub fn prehash(pages: &[u64]) {
+///
+/// `known` (ascending by page): hashes of some of these pages taken already, after their write watch was reset (the
+/// pool walker's, OOT-FPS2): those pages are not hashed again.
+pub fn prehash(pages: &[u64], known: &[(u64, u64)]) {
     if !on() || !prehash_on() || pages.is_empty() {
         return;
     }
@@ -426,17 +429,44 @@ pub fn prehash(pages: &[u64]) {
     let mut v: Vec<u64> = pages.to_vec();
     v.sort_unstable();
     v.dedup();
-    let out: Vec<AtomicU64> = (0..v.len()).map(|_| AtomicU64::new(0)).collect();
-    par_for(v.len(), &|k| {
-        // SAFETY: a whole page a scan of a registered pool's committed guest memory reported written (as `par_hashes`)
-        let h = page_hash(unsafe { core::slice::from_raw_parts(v[k] as *const u8, PAGE as usize) });
-        out[k].store(h, Ordering::Relaxed);
-    });
+    let (mut have, need): (Vec<(u64, u64)>, Vec<u64>) = if known.is_empty() {
+        (Vec::new(), v)
+    } else {
+        let mut have = Vec::new();
+        let mut need = Vec::new();
+        for pg in v {
+            match known.binary_search_by_key(&pg, |e| e.0) {
+                Ok(i) => have.push(known[i]),
+                Err(_) => need.push(pg),
+            }
+        }
+        (have, need)
+    };
+    let hs = hash_pages(&need);
     PRE.with(|p| {
         let mut p = p.borrow_mut();
         p.clear();
-        p.extend(v.iter().zip(out).map(|(&pg, h)| (pg, h.into_inner())));
+        p.extend(need.iter().copied().zip(hs));
+        if !have.is_empty() {
+            p.append(&mut have);
+            p.sort_unstable_by_key(|e| e.0);
+        }
     });
+}
+
+/// The hash of each whole page at these addresses, on the hash threads with the caller.
+pub fn hash_pages(pages: &[u64]) -> Vec<u64> {
+    if pages.is_empty() {
+        return Vec::new();
+    }
+    let out: Vec<AtomicU64> = (0..pages.len()).map(|_| AtomicU64::new(0)).collect();
+    par_for(pages.len(), &|k| {
+        // SAFETY: a whole page of a registered pool's committed guest memory that a write-watch take reported written
+        // (the callers hold the pool lock: the pool stays)
+        let h = page_hash(unsafe { core::slice::from_raw_parts(pages[k] as *const u8, PAGE as usize) });
+        out[k].store(h, Ordering::Relaxed);
+    });
+    out.into_iter().map(|h| h.into_inner()).collect()
 }
 
 /// The end of the pool sync: `prehash`'s hashes are dropped (they describe the guest bytes at that sync only).
@@ -549,10 +579,20 @@ impl ParJob {
 static HASH_JOB: Mutex<(u64, Option<std::sync::Arc<ParJob>>)> = Mutex::new((0, None));
 static HASH_CV: std::sync::Condvar = std::sync::Condvar::new();
 
+/// The `vk page hash` threads besides the caller: `NXGFX_HASH_THREADS`, default half the machine's threads, 2 to 12
+/// (OOT-FPS2: a quarter, at most 6, hashed OoT's ~57 MB a frame of rewritten pages in ~1.9 ms of the replay thread;
+/// page hashing from memory measured 52 GB/s on 7 threads and 69 GB/s on 12 on this machine).
+fn hash_threads() -> usize {
+    match std::env::var("NXGFX_HASH_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(n) => n.clamp(1, 12),
+        None => std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(4).clamp(2, 12),
+    }
+}
+
 fn hash_pool_start() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
-        let n = std::thread::available_parallelism().map(|n| n.get() / 4).unwrap_or(4).clamp(2, 6);
+        let n = hash_threads();
         for _ in 0..n {
             let _ = std::thread::Builder::new().name("vk page hash".into()).spawn(|| {
                 let mut seen = 0u64;
@@ -1510,16 +1550,41 @@ mod tests {
         drop_any(base);
         set(base, &vec![0x11; size as usize]);
         assert_eq!(runs(base, size, base, size), vec![(base, size)], "first upload");
-        prehash(&[base + PAGE, base, base + 2 * PAGE, base]);
+        prehash(&[base + PAGE, base, base + 2 * PAGE, base], &[]);
         assert_eq!(runs(base, size, base, size), vec![], "the same bytes, decided on the prehashes");
         // a page's prehash taken, then its bytes changed before the decision: decided on the prehash, as any hash
         // taken before it (the scan reset its write watch first, so the next scan finds the store)
-        prehash(&[base + PAGE]);
+        prehash(&[base + PAGE], &[]);
         set(base + PAGE, &[0x22; 8]);
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "decided on the prehash");
         prehash_clear();
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![(base + PAGE, PAGE)], "the next sync: its own hash");
         assert_eq!(PRE.with(|l| prehashed_at(&l.borrow(), &mut 0, base)), 0, "cleared");
+        drop_any(base);
+    }
+
+    /// OOT-FPS2: hashes taken already (the walker's, `known`) decide their pages' skips as the sync's own hashes do, and
+    /// only the other pages are hashed: a known hash equal to the GPU copy's skips the page even with the guest bytes
+    /// changed since (the next scan finds that store), a known hash that differs uploads it; pages not known are hashed.
+    #[test]
+    fn known_hashes_stand_for_their_pages_and_the_rest_are_hashed() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(3);
+        let size = 3 * PAGE;
+        drop_any(base);
+        set(base, &vec![0x11; size as usize]);
+        assert_eq!(runs(base, size, base, size), vec![(base, size)], "first upload");
+        let same = page_hash(&vec![0x11; PAGE as usize]);
+        // page 0: known as the GPU copy's bytes though changed since; page 1: known as other bytes; page 2: hashed
+        set(base, &[0x33; 8]);
+        prehash(&[base, base + PAGE, base + 2 * PAGE], &[(base, same), (base + PAGE, 12345)]);
+        let got: Vec<u64> = [base, base + PAGE, base + 2 * PAGE]
+            .iter()
+            .map(|&p| PRE.with(|l| prehashed_at(&l.borrow(), &mut 0, p)))
+            .collect();
+        assert_eq!(got, vec![same, 12345, same], "known hashes kept, the rest hashed");
+        assert_eq!(runs(base, size, base, size), vec![(base + PAGE, PAGE)], "only the page known as different");
+        prehash_clear();
         drop_any(base);
     }
 
