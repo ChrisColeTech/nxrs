@@ -4516,6 +4516,12 @@ pub fn apply_writebacks(
     } else {
         Vec::new()
     };
+    // the pages each write-back may hand to the device (`lazy::take_lazy`: its streaks and held pages, the lazy state's
+    // own lock) chosen before the pool lock (OOT-FPS: ~1.2 ms a frame under it, every page of ~67 MB of ranges); used
+    // below for the write-backs of watched pools only
+    let tl = std::time::Instant::now();
+    let mut lazies: Vec<Vec<u64>> = wbs.iter().map(|w| super::lazy::take_lazy(w.1, w.2)).collect();
+    super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
@@ -4561,7 +4567,7 @@ pub fn apply_writebacks(
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
-            super::lazy::take_lazy(a, n)
+            lazies.get_mut(i).map(std::mem::take).unwrap_or_default()
         } else {
             vec![]
         };
@@ -4715,9 +4721,28 @@ pub(crate) fn merge_changed_bytes(guest: &mut [u8], after: &[u8], before: &[u8])
     assert_eq!(guest.len(), after.len());
     assert_eq!(after.len(), before.len());
     let mut kept = 0;
-    for ((guest, &new), &old) in guest.iter_mut().zip(after).zip(before) {
-        if new != old { *guest = new; }
-        else if *guest != old { kept += 1; }
+    // eight bytes at a time where the producer changed none of them and the guest still has the baseline (most of a
+    // changed page: OOT-FPS, this loop byte by byte was ~2.7 ms a frame of the completion thread under the pool lock);
+    // any other word byte by byte as before (only changed bytes are stored: a CPU store beside them in the same word is
+    // never overwritten)
+    let word = |s: &[u8], i: usize| u64::from_ne_bytes(s[i..i + 8].try_into().unwrap());
+    let n = guest.len();
+    let mut i = 0;
+    while i < n {
+        if i + 8 <= n && word(after, i) == word(before, i) && word(guest, i) == word(before, i) {
+            i += 8;
+            continue;
+        }
+        let end = (i + 8).min(n);
+        for k in i..end {
+            let (new, old) = (after[k], before[k]);
+            if new != old {
+                guest[k] = new;
+            } else if guest[k] != old {
+                kept += 1;
+            }
+        }
+        i = end;
     }
     kept
 }
@@ -4793,6 +4818,46 @@ mod changed_pages_tests {
         let lo = |p: u64| (p * PAGE).saturating_sub(100);
         let got = changed_pages(a, n, &s, &b, &[0x1000_0000 + 4 * PAGE]);
         assert_eq!(got, vec![(0, lo(1)), (lo(2), lo(3)), (lo(3), lo(4)), (lo(5), n)]);
+    }
+
+    /// OOT-FPS: the word-at-a-time merge gives the guest bytes and the kept count of the byte-by-byte one, over
+    /// lengths that end mid-word and producer, CPU and both changes in the same words.
+    #[test]
+    fn the_word_merge_is_the_byte_merge() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for len in [0usize, 1, 7, 8, 9, 63, 4096, 4099] {
+            for _ in 0..20 {
+                let before: Vec<u8> = (0..len).map(|_| rnd() as u8 & 3).collect();
+                let mut after = before.clone();
+                let mut guest = before.clone();
+                for k in 0..len {
+                    let r = rnd();
+                    if r % 7 == 0 {
+                        after[k] ^= 1 + (r >> 8) as u8 % 3;
+                    }
+                    if r % 11 == 0 {
+                        guest[k] ^= 4;
+                    }
+                }
+                let mut want = guest.clone();
+                let mut kept = 0;
+                for k in 0..len {
+                    if after[k] != before[k] {
+                        want[k] = after[k];
+                    } else if want[k] != before[k] {
+                        kept += 1;
+                    }
+                }
+                assert_eq!(super::merge_changed_bytes(&mut guest, &after, &before), kept, "len {len}");
+                assert_eq!(guest, want, "len {len}");
+            }
+        }
     }
 }
 
