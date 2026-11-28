@@ -340,6 +340,7 @@ mod tests {
         stale[0] = 1;
         assert!(library.lookup(0x0010_0000).is_none());
         assert!(library.lookup(0x0010_0010).is_some(), "the other func's entry is its own");
+        assert_eq!(stale, [1, 0]);
         // a table without origins searches the same way
         let plain = unsafe {
             Library::linked(context::ABI, entries.as_ptr(), 2, std::ptr::null(), 0, std::ptr::null(), 0)

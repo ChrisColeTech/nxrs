@@ -7,4 +7,5 @@
 
 pub mod context;
 pub mod dispatch;
+pub mod interp;
 pub mod mem;
