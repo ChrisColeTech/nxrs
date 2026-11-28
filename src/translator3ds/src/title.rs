@@ -1,9 +1,20 @@
-//! the nxrs-side open path for a 3DS title: which kind of dump it is, and the title behind it
-//! the W0 form: detection and the title only. `write_data` (staging, the RomFs adapter,
-//! `control.smdh`, the `romfs.ds` marker) is 3DS-W1 — docs/waves/3DS-W0.md, "W1 owns"
+//! the nxrs-side open path for a 3DS title: which kind of dump it is, the title behind it, and the
+//! data folder a build stages (`write_data`, the Switch flow's layout: programs, the RomFS through
+//! a `translator::package::romfs`-shaped adapter, `control.smdh`, the `romfs.ds` marker record)
 
 use crate::rom::{self, Blob, Error, Title};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use translator::package::PackageError;
+use translator::package::extract;
+use translator::package::marker;
+use translator::package::romfs::{RomFs, StoredFiles};
+
+/// the marker `romfs.source` names for a 3DS build (the Switch markers name NSP/NUP/folder)
+pub const MARKER: &str = "romfs.ds";
+
+/// the ExeFS `.icon` (an SMDH) staged as the data folder's control file
+pub const CONTROL: &str = "control.smdh";
 
 /// the container a title came in as
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +77,188 @@ pub fn kind_of(start: &[u8]) -> Result<DsKind, Error> {
     } else {
         rom::error("not a 3DS cartridge image, .cia or executable")
     }
+}
+
+/// the container in the words a build log names it by
+impl std::fmt::Display for DsKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DsKind::Cart => "3DS cart image",
+            DsKind::Cia => ".cia",
+            DsKind::Cxi => ".cxi",
+            DsKind::App => ".app",
+        })
+    }
+}
+
+/// the dump's RomFS as the Switch-side machinery reads it: the 3DS tables walked into
+/// (path, size, id) triples, each file's bytes read from the dump on demand
+struct DumpFiles {
+    title: Title,
+    /// the RomFS file of each id, in walk order
+    entries: Vec<rom::FileEntry>,
+}
+
+impl StoredFiles for DumpFiles {
+    fn read(&self, id: u32, offset: u64, len: u64) -> Result<Vec<u8>, PackageError> {
+        self.entries
+            .get(id as usize)
+            .and_then(|file| self.title.read_romfs(file, offset, len as usize))
+            .ok_or_else(|| {
+                PackageError::Format(format!("the RomFS file #{id} ends before its size"))
+            })
+    }
+}
+
+/// path of name under the folder at path; nameless folders (the root and the ones some titles
+/// stuff everything under) add nothing, as the module paths spell it too
+fn join(path: &str, name: &str) -> String {
+    if path.is_empty() || name.is_empty() {
+        format!("{path}{name}")
+    } else {
+        format!("{path}/{name}")
+    }
+}
+
+fn walk(
+    romfs: &rom::RomFs,
+    dir: &rom::DirEntry,
+    path: &str,
+    files: &mut Vec<(String, u64, u32)>,
+    entries: &mut Vec<rom::FileEntry>,
+) {
+    for (_, file) in romfs.files(dir) {
+        files.push((join(path, &file.name), file.data_size, entries.len() as u32));
+        entries.push(file);
+    }
+    for (_, subdir) in romfs.subdirs(dir) {
+        walk(romfs, &subdir, &join(path, &subdir.name), files, entries);
+    }
+}
+
+/// `<size> <modification time, ns since 1970>` of a file, `- -` when it cannot be read
+/// (the Switch record's stamp rows, so the words stay one shape)
+fn file_stamp(p: &Path) -> String {
+    let Ok(m) = std::fs::metadata(p) else {
+        return "- -".into();
+    };
+    let ns = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{} {ns}", m.len())
+}
+
+impl Game3ds {
+    /// Stage the data folder a build hands the runtime, the Switch flow's layout:
+    /// `exefs/` (the exe's code and its exheader), `romfs/` (extracted through the adapter),
+    /// `control.smdh` (the ExeFS `.icon`) and the `romfs.source` record. Says what was applied,
+    /// in the words the launcher reads; skips the RomFS while the record says the copy is current.
+    pub fn write_data(&self, datadir: &Path, say: &dyn Fn(&str)) -> Result<(), Error> {
+        self.write_data_with(datadir, say, &|_, _| {})
+    }
+
+    /// [`Game3ds::write_data`], with `progress(bytes, total)` called while the RomFS is written out.
+    pub fn write_data_with(
+        &self,
+        datadir: &Path,
+        say: &dyn Fn(&str),
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<(), Error> {
+        let write = |p: &Path, bytes: &[u8]| -> Result<(), Error> {
+            std::fs::write(p, bytes).map_err(|source| io_err(p, source))
+        };
+        say(&format!("Package: {} {}", self.kind, self.path.display()));
+        // the exe's program: the code segments back to back, the exheader beside it saying where
+        // each sits (the CROs are RomFS files and arrive with the extraction below)
+        let ex = datadir.join("exefs");
+        std::fs::create_dir_all(&ex).map_err(|source| io_err(&ex, source))?;
+        let code_path = ex.join("code");
+        write(&code_path, &self.title.code()?)?;
+        let exheader_path = ex.join("exheader.bin");
+        write(&exheader_path, &self.title.exheader_raw)?;
+        self.write_romfs(datadir, say, progress)?;
+        if let Some(icon) = self.title.icon() {
+            let p = datadir.join(CONTROL);
+            write(&p, &icon)?;
+        }
+        Ok(())
+    }
+
+    /// The dump's RomFS into the data folder: `romfs/` (or, for names a Windows folder cannot hold,
+    /// the extraction refuses: a 3DS image has no `romfs.bin` shape the runtime reads), recorded in
+    /// `romfs.source`; skipped while the record says the copy is current. The in-place markers of
+    /// older builds are removed.
+    fn write_romfs(
+        &self,
+        datadir: &Path,
+        say: &dyn Fn(&str),
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<(), Error> {
+        for old in [marker::NSP, marker::NUP, marker::DIR] {
+            let _ = std::fs::remove_file(datadir.join(old));
+        }
+        let (folder, record) =
+            (datadir.join(marker::FOLDER), datadir.join(marker::SOURCE));
+        let Some(romfs) = &self.title.romfs else {
+            // no RomFS: the runtime finds an empty romfs/ folder
+            let _ = std::fs::remove_file(&record);
+            std::fs::create_dir_all(&folder)
+                .map_err(|source| io_err(&folder, source))?;
+            say(&format!("RomFS: {} has none", self.path.display()));
+            return Ok(());
+        };
+        let mut files: Vec<(String, u64, u32)> = Vec::new();
+        let mut entries: Vec<rom::FileEntry> = Vec::new();
+        if let Ok(root) = romfs.root() {
+            walk(romfs, &root, "", &mut files, &mut entries);
+        }
+        let stored = RomFs::from_stored(
+            &files,
+            Arc::new(DumpFiles {
+                title: Title::open(Blob::open(&self.path)?)?,
+                entries,
+            }),
+            format!("3ds {}", self.path.display()),
+        )
+        .map_err(Error::from)?;
+        let bytes: u64 = files.iter().map(|f| f.1).sum();
+        let text = format!(
+            "{}\nmarker {MARKER}\nextracted {} {} {bytes}\nstamp {} {}\n",
+            self.path.display(),
+            marker::FOLDER,
+            files.len(),
+            file_stamp(&self.path),
+            self.path.display(),
+        );
+        if folder.is_dir() && std::fs::read_to_string(&record).is_ok_and(|t| t == text) {
+            say("RomFS: romfs/ is current (unchanged since the last build)");
+            return Ok(());
+        }
+        // the record goes first: a copy cut short is never taken as current
+        let _ = std::fs::remove_file(&record);
+        let t = std::time::Instant::now();
+        say(&format!(
+            "RomFS: extracting {} into romfs/",
+            self.path.display()
+        ));
+        let (written, n) =
+            extract::tree(&stored, &folder, extract::default_threads(), progress)?;
+        let _ = std::fs::remove_file(datadir.join(marker::IMAGE));
+        let mb = |b: u64| b as f64 / 1048576.0;
+        say(&format!(
+            "RomFS: extracted into romfs/ ({written} files, {:.1} MB, {:.1} s)",
+            mb(n),
+            t.elapsed().as_secs_f64()
+        ));
+        std::fs::write(&record, text).map_err(|source| io_err(&record, source))?;
+        Ok(())
+    }
+}
+
+fn io_err(p: &Path, source: std::io::Error) -> Error {
+    Error::from(format!("{}: {source}", p.display()))
 }
 
 #[cfg(test)]
@@ -169,5 +362,87 @@ mod tests {
         out[record + 6..record + 8].copy_from_slice(&kind.to_be_bytes());
         out[content_at..].copy_from_slice(&content);
         out
+    }
+
+    /// write_data stages the Switch flow's layout: the exe's code + exheader under exefs/, the
+    /// RomFS extracted through the adapter, the `.icon` as control.smdh, and the `romfs.ds`
+    /// record; a second run over the same dump finds the copy current
+    #[test]
+    fn write_data_stages_the_data_folder() {
+        use crate::rom::tests::{rom_bytes_icon, smdh};
+
+        let icon = smdh("Staged", "Staged Long", "nxrs", 0x001F);
+        let path = std::env::temp_dir().join(format!(
+            "translator3ds-stage-{}.cxi",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            rom_bytes_icon(
+                &words(&[0xE3A0_0000, 0xE12F_FF1E]),
+                &[("static.crs", b"crs"), ("cro/Battle.cro", b"battle")],
+                Some(&icon),
+            ),
+        )
+        .unwrap();
+        let game = open(&path).unwrap();
+        let data = std::env::temp_dir().join(format!("translator3ds-stage-{}", std::process::id()));
+        std::fs::remove_dir_all(&data).ok();
+        std::fs::create_dir_all(&data).unwrap();
+        let said = std::sync::Mutex::new(Vec::new());
+        game.write_data_with(&data, &|m| said.lock().unwrap().push(m.to_owned()), &|_, _| {})
+            .unwrap();
+        let read = |rel: &str| std::fs::read(data.join(rel)).unwrap();
+        let title = &game.title;
+        assert_eq!(read("exefs/code"), title.code().unwrap());
+        assert_eq!(read("exefs/exheader.bin"), title.exheader_raw);
+        assert_eq!(read("romfs/static.crs"), b"crs");
+        assert_eq!(read("romfs/cro/Battle.cro"), b"battle");
+        assert_eq!(read(CONTROL), icon);
+        let record = std::fs::read_to_string(data.join("romfs.source")).unwrap();
+        let rows: Vec<&str> = record.lines().collect();
+        assert_eq!(rows[0], path.display().to_string());
+        assert_eq!(rows[1], "marker romfs.ds");
+        assert!(rows[2].starts_with("extracted romfs 2 "), "{}", rows[2]);
+        assert!(rows[3].starts_with("stamp "), "{}", rows[3]);
+        // the extraction says itself, then the copy is current
+        let said = said.into_inner().unwrap();
+        assert!(said.iter().any(|m| m.starts_with("RomFS: extracting")), "{said:?}");
+        let said = std::sync::Mutex::new(Vec::new());
+        game.write_data_with(&data, &|m| said.lock().unwrap().push(m.to_owned()), &|_, _| {})
+            .unwrap();
+        assert!(said
+            .into_inner()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("is current")),);
+        drop(game);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// a title without a RomFS stages an empty romfs/ folder and no record; without an `.icon`
+    /// it stages no control file
+    #[test]
+    fn a_title_without_romfs_or_icon_stages_without_them() {
+        use crate::rom::tests::rom_bytes;
+
+        let path = std::env::temp_dir().join(format!(
+            "translator3ds-stage-bare-{}.cxi",
+            std::process::id()
+        ));
+        std::fs::write(&path, rom_bytes(&words(&[0xE12F_FF1E]), &[])).unwrap();
+        let game = open(&path).unwrap();
+        let data = std::env::temp_dir().join(format!("translator3ds-stage-bare-{}", std::process::id()));
+        std::fs::remove_dir_all(&data).ok();
+        std::fs::create_dir_all(&data).unwrap();
+        game.write_data(&data, &|_| {}).unwrap();
+        assert!(data.join("romfs").is_dir());
+        assert!(!data.join("romfs.source").exists());
+        assert!(!data.join(CONTROL).exists());
+        assert!(data.join("exefs/code").is_file());
+        drop(game);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(&data).unwrap();
     }
 }

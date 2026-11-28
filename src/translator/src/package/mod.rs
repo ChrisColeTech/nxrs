@@ -24,7 +24,7 @@ pub mod dlc;
 mod error;
 pub mod extract;
 mod folder;
-mod io;
+pub mod io;
 mod keys;
 pub mod marker;
 mod nca;
