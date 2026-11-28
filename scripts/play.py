@@ -21,7 +21,8 @@ Steps (one string each, run in order; `; S` waits S seconds after the step, `* N
 
 The game is killed by PID at the time limit or when no frame is presented for --stall seconds (after the
 diagnostics `threads`, `gfx`, `counters`, `gaps` and a window shot). Saves: the title's save folder is copied
-into the run folder and given to the game through NXOS_SAVE; --real-save uses the real one.
+into the run folder and given to the game through NXOS_SAVE (a scenario's `save = "build/saves/..."` copies that
+folder instead); --real-save uses the real one.
 """
 import argparse
 import ctypes
@@ -287,7 +288,10 @@ def start(a, sc, name):
         (folder / 'faults').mkdir()
         env['NXGFX_FAULT_SHOTS'] = str(folder / 'faults')
     if not a.real_save:
-        real = exe.parent / (exe.stem + '_data') / 'save'
+        # a scenario's `save` (a folder under the repo, e.g. build/saves/...) starts from that save instead
+        real = ROOT / sc['save'] if sc.get('save') else exe.parent / (exe.stem + '_data') / 'save'
+        if sc.get('save') and not real.is_dir():
+            raise SystemExit('no save at %s (scenario %s)' % (real, name))
         if real.is_dir():
             shutil.copytree(real, folder / 'save')
         else:

@@ -206,6 +206,24 @@ d20 = "Link in his house"
 d30 = "Link in his house"
 last = "Link in his house"
 
+[oot-saved]
+title = "The Legend of Zelda Ocarina of Time"
+about = "from the autosave in build/saves/oot-house (taken from an oot run): title, load, Link in his house"
+# The save is the autosave an oot run writes at ~413 s (build/play/20261128-044556-r2-base/save; build/ is not in
+# git, so it stays on this machine). The title shows Continue at ~29 s; A -> the Load list (the autosave "Kokiri
+# Forest" selected) -> A -> Load / Cancel -> A loads. First probe (build/play/20261128-083853-oot-saved-probe): the
+# GPU device was lost at 53.5 s during that load (a read 0x1000 past the end of a 4 MB descriptor buffer).
+save = "build/saves/oot-house"
+seconds = 150
+window = [110, 150]
+fps = 59
+steps = ["wait 25", "shot title", "press A ; 4", "shot p01", "press A ; 4", "shot p02", "press A ; 4", "shot p03",
+         "press A ; 4", "shot p04", "press A ; 4", "shot p05", "press A ; 4", "shot p06", "press A ; 4", "shot p07",
+         "press A ; 4", "shot p08", "press A ; 4", "shot p09", "press A ; 4", "shot p10", "press A ; 4", "shot p11",
+         "press A ; 4", "shot p12", "press A ; 4", "shot p13", "press A ; 4", "shot p14", "press A ; 4", "shot p15",
+         "press A ; 4", "shot p16", "press A ; 4", "shot p17", "press A ; 4", "shot p18", "press A ; 4", "shot p19",
+         "press A ; 4", "shot p20", "wait 5", "shot last"]
+
 [mk8d]
 title = "Mario Kart 8 Deluxe"
 about = "Mii, menus, a Grand Prix, drive"
